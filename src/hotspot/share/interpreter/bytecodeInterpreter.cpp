@@ -1772,7 +1772,7 @@ run:
       }
 
       /* monitorenter and monitorexit for locking/unlocking an object */
-
+      // monitorenter 指令开始.
       CASE(_monitorenter): {
         oop lockee = STACK_OBJECT(-1);
         // derefing's lockee ought to provoke implicit null check
