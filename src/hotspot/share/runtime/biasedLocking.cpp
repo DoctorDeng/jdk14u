@@ -301,12 +301,12 @@ void BiasedLocking::single_revoke_at_safepoint(oop obj, bool is_bulk, JavaThread
   }
 }
 
-
+// 启发式结果.
 enum HeuristicsResult {
-  HR_NOT_BIASED    = 1,
-  HR_SINGLE_REVOKE = 2,
-  HR_BULK_REBIAS   = 3,
-  HR_BULK_REVOKE   = 4
+  HR_NOT_BIASED    = 1, // 没有偏向.
+  HR_SINGLE_REVOKE = 2, // 当个偏向撤销.
+  HR_BULK_REBIAS   = 3, // 批量重新偏向.
+  HR_BULK_REVOKE   = 4  // 批量撤销.
 };
 
 
@@ -315,7 +315,7 @@ static HeuristicsResult update_heuristics(oop o) {
   if (!mark.has_bias_pattern()) {
     return HR_NOT_BIASED;
   }
-
+  // 尝试限制撤销数量的启发式方法.
   // Heuristics to attempt to throttle the number of revocations.
   // Stages:
   // 1. Revoke the biases of all objects in the heap of this type,
@@ -323,6 +323,8 @@ static HeuristicsResult update_heuristics(oop o) {
   // 2. Revoke the biases of all objects in the heap of this type
   //    and don't allow rebiasing of these objects. Disable
   //    allocation of objects of that type with the bias bit set.
+  // 1. 撤销此 Class 类堆中所有对象的偏向，如果对象已解锁，则允许对这些对象进行重新偏向.
+  // 2. 撤销此 Class 类堆中所有对象的偏向, 不允许重新偏向. 禁止对象设置偏向锁位.
   Klass* k = o->klass();
   jlong cur_time = os::javaTimeMillis();
   jlong last_bulk_revocation_time = k->last_biased_lock_bulk_revocation_time();
@@ -758,11 +760,11 @@ void BiasedLocking::revoke(Handle obj, TRAPS) {
     // update the heuristics because doing so may cause unwanted bulk
     // revocations (which are expensive) to occur.
     markWord mark = obj->mark();
-
+    // 如果未开启偏向, 则无需进行偏向锁撤销操作, 此时直接退出.
     if (!mark.has_bias_pattern()) {
       return;
     }
-
+    // 如果是匿名偏向, 尝试直接通过 CAS 更新锁对象 mark word, 更新后 mark word 格式变为无锁状态（偏向锁位将为 0）.
     if (mark.is_biased_anonymously()) {
       // We are probably trying to revoke the bias of this object due to
       // an identity hash code computation. Try to revoke the bias
@@ -777,9 +779,12 @@ void BiasedLocking::revoke(Handle obj, TRAPS) {
         return;
       }
       mark = res_mark;  // Refresh mark with the latest value.
-    } else {
+    }
+    // 如果已偏向其他线程.
+    else {
       Klass* k = obj->klass();
       markWord prototype_header = k->prototype_header();
+      // 如果锁对象 Class 类未开启偏向, 尝试通过 CAS 将锁对数 mark word 更新为 Class 类的 mark word.
       if (!prototype_header.has_bias_pattern()) {
         // This object has a stale bias from before the bulk revocation
         // for this data type occurred. It's pointless to update the
@@ -787,16 +792,23 @@ void BiasedLocking::revoke(Handle obj, TRAPS) {
         // CAS. If we fail this race, the object's bias has been revoked
         // by another thread so we simply return and let the caller deal
         // with it.
+        // 此数据类型批量撤销之前锁对象有一个过期的偏向,
+        // 在这一点上启发式更新是没有意义的，因此只需使用 CAS 更新 mark word 即可。
+        // 如果失败了，那么对象的偏向已经被另一个线程撤销了，所以只需返回并让调用者处理它.
         obj->cas_set_mark(prototype_header.set_age(mark.age()), mark);
         assert(!obj->mark().has_bias_pattern(), "even if we raced, should still be revoked");
         return;
-      } else if (prototype_header.bias_epoch() != mark.bias_epoch()) {
+      }
+      // 如果 Class 类 epoch 值与锁对象 epoch 值不同, 
+      else if (prototype_header.bias_epoch() != mark.bias_epoch()) {
         // The epoch of this biasing has expired indicating that the
         // object is effectively unbiased. We can revoke the bias of this
         // object efficiently enough with a CAS that we shouldn't update the
         // heuristics. This is normally done in the assembly code but we
         // can reach this point due to various points in the runtime
         // needing to revoke biases.
+        // 此偏向的 epoch 已过期，表明锁对象实际上没有偏向.
+        // 此时可以通过 CAS 有效地消除该对象的偏向，而不必启发式更新.
         markWord res_mark;
         markWord biased_value       = mark;
         markWord unbiased_prototype = markWord::prototype().set_age(mark.age());

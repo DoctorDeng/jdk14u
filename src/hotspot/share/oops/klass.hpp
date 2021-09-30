@@ -159,8 +159,11 @@ class Klass : public Metadata {
 
   // Biased locking implementation and statistics
   // (the 64-bit chunk goes first, to avoid some fragmentation)
+  // 最后一次偏向锁撤销时间.
   jlong    _last_biased_lock_bulk_revocation_time;
+  // 当使用偏向锁是该类型总是启用或禁用. 
   markWord _prototype_header;   // Used when biased locking is both enabled and disabled for this type
+  // 偏向锁撤销计数.
   jint     _biased_lock_revocation_count;
 
   // vtable length
@@ -627,6 +630,8 @@ protected:
   // Note: the prototype header is always set up to be at least the
   // prototype markWord. If biased locking is enabled it may further be
   // biasable and have an epoch.
+  // Class 类 markword 用于支持偏向锁.
+  // prototype header 至少是原型 markword，如果开启了偏向锁则还可能是可偏向的，具有 epoch 值.
   markWord prototype_header() const      { return _prototype_header; }
   // NOTE: once instances of this klass are floating around in the
   // system, this header must only be updated at a safepoint.
