@@ -324,7 +324,7 @@ static HeuristicsResult update_heuristics(oop o) {
   //    and don't allow rebiasing of these objects. Disable
   //    allocation of objects of that type with the bias bit set.
   // 1. 撤销此 Class 类堆中所有对象的偏向，如果对象已解锁，则允许对这些对象进行重新偏向.
-  // 2. 撤销此 Class 类堆中所有对象的偏向, 不允许重新偏向. 禁止对象设置偏向锁位.
+  // 2. 撤销此 Class 类堆中所有对象的偏向, 不允许重新偏向这些对象. 禁止对象设置偏向锁位.
   Klass* k = o->klass();
   jlong cur_time = os::javaTimeMillis();
   jlong last_bulk_revocation_time = k->last_biased_lock_bulk_revocation_time();
@@ -349,6 +349,7 @@ static HeuristicsResult update_heuristics(oop o) {
   }
 
   // Make revocation count saturate just beyond BiasedLockingBulkRevokeThreshold
+  // 使撤销计数器饱和, 使其刚好超过 BiasedLockingBulkRevokeThreshold 设置的值.
   if (revocation_count <= BiasedLockingBulkRevokeThreshold) {
     revocation_count = k->atomic_incr_biased_lock_revocation_count();
   }
@@ -826,6 +827,7 @@ void BiasedLocking::revoke(Handle obj, TRAPS) {
     } else if (heuristics == HR_SINGLE_REVOKE) {
       JavaThread *blt = mark.biased_locker();
       assert(blt != NULL, "invariant");
+      // 如果是 Java 线程.
       if (blt == THREAD) {
         // A thread is trying to revoke the bias of an object biased
         // toward it, again likely due to an identity hash code
@@ -833,6 +835,8 @@ void BiasedLocking::revoke(Handle obj, TRAPS) {
         // since we are only going to walk our own stack. There are no
         // races with revocations occurring in other threads because we
         // reach no safepoints in the revocation path.
+        // 撤销对象对当前线程的偏向, 可能由于调用 Object#hashCode() 方法导致.
+        // 在这种情况下，因为只遍历线程自己的栈，因此可以不在安全点(safepoint)执行.
         EventBiasedLockSelfRevocation event;
         ResourceMark rm;
         walk_stack_and_revoke(obj(), blt);
@@ -848,12 +852,15 @@ void BiasedLocking::revoke(Handle obj, TRAPS) {
           return;
         }
       }
-    } else {
+    }
+    // 如果是 VM 线程, 进行批量撤销.
+    else {
       assert((heuristics == HR_BULK_REVOKE) ||
          (heuristics == HR_BULK_REBIAS), "?");
       EventBiasedLockClassRevocation event;
       VM_BulkRevokeBias bulk_revoke(&obj, (JavaThread*)THREAD,
                                     (heuristics == HR_BULK_REBIAS));
+      // 最终会在 VM 线程中的 safepoint 调用 revoke 方法
       VMThread::execute(&bulk_revoke);
       if (event.should_commit()) {
         post_class_revocation_event(&event, obj->klass(), &bulk_revoke);
