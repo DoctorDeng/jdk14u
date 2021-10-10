@@ -304,9 +304,9 @@ void BiasedLocking::single_revoke_at_safepoint(oop obj, bool is_bulk, JavaThread
 // 启发式结果.
 enum HeuristicsResult {
   HR_NOT_BIASED    = 1, // 没有偏向.
-  HR_SINGLE_REVOKE = 2, // 当个偏向撤销.
-  HR_BULK_REBIAS   = 3, // 批量重新偏向.
-  HR_BULK_REVOKE   = 4  // 批量撤销.
+  HR_SINGLE_REVOKE = 2, // 单个偏向锁撤销.
+  HR_BULK_REBIAS   = 3, // 批量重新偏向（此时锁对象运行重新偏向）.
+  HR_BULK_REVOKE   = 4  // 批量撤销（此时偏向锁彻底不可用，锁对象无法偏向）.
 };
 
 
@@ -315,7 +315,6 @@ static HeuristicsResult update_heuristics(oop o) {
   if (!mark.has_bias_pattern()) {
     return HR_NOT_BIASED;
   }
-  // 尝试限制撤销数量的启发式方法.
   // Heuristics to attempt to throttle the number of revocations.
   // Stages:
   // 1. Revoke the biases of all objects in the heap of this type,
@@ -323,12 +322,18 @@ static HeuristicsResult update_heuristics(oop o) {
   // 2. Revoke the biases of all objects in the heap of this type
   //    and don't allow rebiasing of these objects. Disable
   //    allocation of objects of that type with the bias bit set.
+  // 尝试限制撤销数量的启发式方法，步骤如下：
   // 1. 撤销此 Class 类堆中所有对象的偏向，如果对象已解锁，则允许对这些对象进行重新偏向.
-  // 2. 撤销此 Class 类堆中所有对象的偏向, 不允许重新偏向这些对象. 禁止对象设置偏向锁位.
+  //     满足该条件需要锁对象 Class 类记录的偏向锁撤销次数等于偏向锁批量重偏向阈值（BiasedLockingBulkRebiasThreshold）
+  // 2. 撤销此 Class 类堆中所有对象的偏向, 不允许这些对象重新偏向. 禁止对象设置偏向锁位.
+  //    满足该条件需要锁对象 Class 类记录的偏向锁撤销次数等于偏向锁批量撤销阈值（BiasedLockingBulkRevokeThreshold）
   Klass* k = o->klass();
   jlong cur_time = os::javaTimeMillis();
   jlong last_bulk_revocation_time = k->last_biased_lock_bulk_revocation_time();
   int revocation_count = k->biased_lock_revocation_count();
+  // 当偏向锁撤销次数大于等于偏向锁批量重偏向阈值（BiasedLockingBulkRebiasThreshold）
+  // 且小于偏向锁批量撤销阈值（BiasedLockingBulkRevokeThreshold）
+  // 且最后撤销时间小于与当前时间之差大于偏向锁衰退时间(BiasedLockingDecayTime)时将撤销计数归 0.
   if ((revocation_count >= BiasedLockingBulkRebiasThreshold) &&
       (revocation_count <  BiasedLockingBulkRevokeThreshold) &&
       (last_bulk_revocation_time != 0) &&
@@ -349,19 +354,20 @@ static HeuristicsResult update_heuristics(oop o) {
   }
 
   // Make revocation count saturate just beyond BiasedLockingBulkRevokeThreshold
-  // 使撤销计数器饱和, 使其刚好超过 BiasedLockingBulkRevokeThreshold 设置的值.
+  // 偏向锁撤销计数值 +1.
   if (revocation_count <= BiasedLockingBulkRevokeThreshold) {
     revocation_count = k->atomic_incr_biased_lock_revocation_count();
   }
-
+  // 1. 偏向锁撤销计数等于偏向锁批量撤销阈值（BiasedLockingBulkRevokeThreshold）时需要批量撤销偏向锁.
   if (revocation_count == BiasedLockingBulkRevokeThreshold) {
     return HR_BULK_REVOKE;
   }
-
+  // 2. 偏向锁撤销计数等于偏向锁批量重偏向阈值（BiasedLockingBulkRebiasThreshold）时需要批量重偏向.
   if (revocation_count == BiasedLockingBulkRebiasThreshold) {
     return HR_BULK_REBIAS;
   }
 
+  // 3. 否则撤销当个偏向锁.
   return HR_SINGLE_REVOKE;
 }
 
@@ -642,6 +648,9 @@ BiasedLocking::Condition BiasedLocking::single_revoke_with_handshake(Handle obj,
     // Grab Threads_lock before manually trying to revoke bias. This avoids race with a newly
     // created JavaThread (that happens to get the same memory address as biaser) synchronizing
     // on this object.
+    // 线程不是活动的.
+    // 在手动尝试撤销偏向之前获取线程锁定.
+    // 这避免了与新创建的 JavaThread（恰好与 biaser 获得相同的内存地址）在该对象上同步的竞争.
     {
       MutexLocker ml(Threads_lock);
       markWord mark = obj->mark();
@@ -824,10 +833,12 @@ void BiasedLocking::revoke(Handle obj, TRAPS) {
     HeuristicsResult heuristics = update_heuristics(obj());
     if (heuristics == HR_NOT_BIASED) {
       return;
-    } else if (heuristics == HR_SINGLE_REVOKE) {
+    } 
+    // 单个偏向锁撤销逻辑.
+    else if (heuristics == HR_SINGLE_REVOKE) {
       JavaThread *blt = mark.biased_locker();
       assert(blt != NULL, "invariant");
-      // 如果是 Java 线程.
+      // 如果当前线程是锁对象偏向线程.
       if (blt == THREAD) {
         // A thread is trying to revoke the bias of an object biased
         // toward it, again likely due to an identity hash code
@@ -847,13 +858,16 @@ void BiasedLocking::revoke(Handle obj, TRAPS) {
         }
         return;
       } else {
+        // 偏向线程不是当前线程偏向锁撤销逻辑，此时有锁的竞争.
         BiasedLocking::Condition cond = single_revoke_with_handshake(obj, (JavaThread*)THREAD, blt);
         if (cond != NOT_REVOKED) {
           return;
         }
       }
     }
-    // 如果是 VM 线程, 进行批量撤销.
+    // 偏向锁批量撤销逻辑，需要批量撤销的场景如下：
+    // * 锁对象 Class 类 epoch 值发生变动该类对应所有实例上的偏向锁此时都已过期，需要撤销.
+    // * 偏向锁撤销次数超过一定阀值后需要进行锁升级，此时需要撤销偏向锁.
     else {
       assert((heuristics == HR_BULK_REVOKE) ||
          (heuristics == HR_BULK_REBIAS), "?");
