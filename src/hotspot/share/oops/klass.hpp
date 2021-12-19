@@ -161,7 +161,7 @@ class Klass : public Metadata {
   // (the 64-bit chunk goes first, to avoid some fragmentation)
   // 最后一次偏向锁撤销时间.
   jlong    _last_biased_lock_bulk_revocation_time;
-  // 当使用偏向锁是该类型总是启用或禁用. 
+  // 当使用偏向锁时该类型总是启用或禁用. 
   markWord _prototype_header;   // Used when biased locking is both enabled and disabled for this type
   // 偏向锁撤销计数.
   jint     _biased_lock_revocation_count;

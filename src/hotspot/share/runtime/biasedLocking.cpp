@@ -155,11 +155,14 @@ static GrowableArray<MonitorInfo*>* get_or_compute_monitor_info(JavaThread* thre
 
 // After the call, *biased_locker will be set to obj->mark()->biased_locker() if biased_locker != NULL,
 // AND it is a living thread. Otherwise it will not be updated, (i.e. the caller is responsible for initialization).
+// 如果已偏向线程(biased_locker)不为 NULL 且存活（即没有进入终止（TERMINATED）状态）则将 obj 对象头中的偏向线程设置为 biased_locker.
+// 否则将不做任何更新.
 void BiasedLocking::single_revoke_at_safepoint(oop obj, bool is_bulk, JavaThread* requesting_thread, JavaThread** biased_locker) {
   assert(SafepointSynchronize::is_at_safepoint(), "must be done at safepoint");
   assert(Thread::current()->is_VM_thread(), "must be VMThread");
 
   markWord mark = obj->mark();
+  // 1. 未开启偏向锁直接返回.
   if (!mark.has_bias_pattern()) {
     if (log_is_enabled(Info, biasedlocking)) {
       ResourceMark rm;
@@ -200,6 +203,7 @@ void BiasedLocking::single_revoke_at_safepoint(oop obj, bool is_bulk, JavaThread
                              (intptr_t) requesting_thread);
   }
 
+  // 2. 匿名偏向时(即偏向线程为 NULL) 直接设置 mark word 为未开启偏向锁功能的原始状态.
   JavaThread* biased_thread = mark.biased_locker();
   if (biased_thread == NULL) {
     // Object is anonymously biased. We can get here if, for
@@ -216,6 +220,7 @@ void BiasedLocking::single_revoke_at_safepoint(oop obj, bool is_bulk, JavaThread
     return;
   }
 
+  // 3. 处理锁对象所偏向的线程已退出的情况
   // Handle case where the thread toward which the object was biased has exited
   bool thread_is_alive = false;
   if (requesting_thread == biased_thread) {
@@ -224,6 +229,7 @@ void BiasedLocking::single_revoke_at_safepoint(oop obj, bool is_bulk, JavaThread
     ThreadsListHandle tlh;
     thread_is_alive = tlh.includes(biased_thread);
   }
+  // 如果偏向线程已死亡则直接设置 mark word 为未开启偏向锁功能的原始状态.
   if (!thread_is_alive) {
     obj->set_mark(unbiased_prototype);
     // Log at "info" level if not bulk, else "trace" level
@@ -251,15 +257,24 @@ void BiasedLocking::single_revoke_at_safepoint(oop obj, bool is_bulk, JavaThread
   // write down the needed displaced headers to the thread's stack.
   // Otherwise, restore the object's header either to the unlocked
   // or unbiased state.
+  // 4. 偏向的线程是存活的. 检查当前是否拥有锁，如果是，将所需的替换头(displaced headers)写入线程堆栈.
+  // 否则，将对象的 mark word 还原到未锁定的或未偏向的状态.
   GrowableArray<MonitorInfo*>* cached_monitor_info = get_or_compute_monitor_info(biased_thread);
   BasicLock* highest_lock = NULL;
+  // 遍历线程堆栈中的 MonitorInfo.
+  // 注：MonitorInfo 是一个资源对象，它描述：Monitor 对象(管程，或称为监视器)的所有者、Monitor 对象对应的锁.
+  //   Monitor 对象是同步的基本实现单元，每个对象实例都会有一个 Monitor，Monitor 可以和对象一起创建、销毁。Monitor 是由 ObjectMonitor 实现.
+  //   每当线程获取基于 synchronized 的锁时线程堆栈上便会有相应的 MonitorInfo 对象来记录 Monitor 及其锁相关信息.
   for (int i = 0; i < cached_monitor_info->length(); i++) {
     MonitorInfo* mon_info = cached_monitor_info->at(i);
+    // 如果 MonitorInfo 属于该锁对象，将 MonitorInfo 中 BasicLock 记录的  displaced header 设置为  000..00011(即表示锁对象在 GC 中).
     if (mon_info->owner() == obj) {
       log_trace(biasedlocking)("   mon_info->owner (" PTR_FORMAT ") == obj (" PTR_FORMAT ")",
                                p2i((void *) mon_info->owner()),
                                p2i((void *) obj));
       // Assume recursive case and fix up highest lock below
+      // (BasicLock*) NULL 表示指针地址为 0 即不指向任何内存地址.
+      // markWord::encode((BasicLock*) NULL) 值格式为: 00000...0011(后缀 11 表示对象在 GC 中).
       markWord mark = markWord::encode((BasicLock*) NULL);
       highest_lock = mon_info->lock();
       highest_lock->set_displaced_header(mark);
@@ -269,6 +284,10 @@ void BiasedLocking::single_revoke_at_safepoint(oop obj, bool is_bulk, JavaThread
                                p2i((void *) obj));
     }
   }
+  // 如果高位锁（即线程堆栈中该锁对象创建的第一个 MonitorInfo）存在则：
+  // * 将其 displaced header 设置为原型值
+  // * 将锁对象 mark word 重置为高位锁 mark word
+  // 否则将锁对象 mark word 设置为原型值.
   if (highest_lock != NULL) {
     // Fix up highest lock to contain displaced header and point
     // object at it
@@ -367,7 +386,7 @@ static HeuristicsResult update_heuristics(oop o) {
     return HR_BULK_REBIAS;
   }
 
-  // 3. 否则撤销当个偏向锁.
+  // 3. 否则撤销单个偏向锁.
   return HR_SINGLE_REVOKE;
 }
 
@@ -619,7 +638,7 @@ static void post_class_revocation_event(EventBiasedLockClassRevocation* event, K
   event->commit();
 }
 
-
+// 单个偏向锁撤销逻辑, 当偏向锁偏向的线程不为当前线程时执行该方法.
 BiasedLocking::Condition BiasedLocking::single_revoke_with_handshake(Handle obj, JavaThread *requester, JavaThread *biaser) {
 
   EventBiasedLockRevocation event;
@@ -631,10 +650,12 @@ BiasedLocking::Condition BiasedLocking::single_revoke_with_handshake(Handle obj,
                                      p2i(biaser), p2i(obj()));
 
   RevokeOneBias revoke(obj, requester, biaser);
+  // 由于当前线程不是偏向线程，因此偏向锁撤销逻操作只能委托给偏向线程，让偏向线程执行 BiasedLocking::revoke() 方法完成偏向锁撤销.
   bool executed = Handshake::execute(&revoke, biaser);
   if (revoke.status_code() == NOT_REVOKED) {
     return NOT_REVOKED;
   }
+  // 如果偏向线程已执行偏向锁撤销方法则直接返回.
   if (executed) {
     log_info(biasedlocking, handshake)("Handshake revocation for object " INTPTR_FORMAT " succeeded. Bias was %srevoked",
                                        p2i(obj()), (revoke.status_code() == BIAS_REVOKED ? "" : "already "));
@@ -648,18 +669,20 @@ BiasedLocking::Condition BiasedLocking::single_revoke_with_handshake(Handle obj,
     // Grab Threads_lock before manually trying to revoke bias. This avoids race with a newly
     // created JavaThread (that happens to get the same memory address as biaser) synchronizing
     // on this object.
-    // 线程不是活动的.
+    // 线程不是活动的, 不会执行偏向锁撤销方法.
     // 在手动尝试撤销偏向之前获取线程锁定.
-    // 这避免了与新创建的 JavaThread（恰好与 biaser 获得相同的内存地址）在该对象上同步的竞争.
+    // 这避免了与新创建的 JavaThread（恰好与已偏向线程(biaser)获得相同的内存地址）在该对象上同步的竞争.
     {
       MutexLocker ml(Threads_lock);
       markWord mark = obj->mark();
       // Check if somebody else was able to revoke it before biased thread exited.
+      // 再次检查偏向锁是否已撤销.
       if (!mark.has_bias_pattern()) {
         return NOT_BIASED;
       }
       ThreadsListHandle tlh;
       markWord prototype = obj->klass()->prototype_header();
+      // 当 Class 未开启偏向或者线程列表中不包含当前线程且当前线程已是偏向线程且 epoch 值未过期时通过 CAS 设置锁对象 mark word 为原型值.
       if (!prototype.has_bias_pattern() || (!tlh.includes(biaser) && biaser == mark.biased_locker() &&
                                             prototype.bias_epoch() == mark.bias_epoch())) {
         obj->cas_set_mark(markWord::prototype().set_age(mark.age()), mark);
@@ -761,20 +784,23 @@ void BiasedLocking::revoke_own_lock(Handle obj, TRAPS) {
   }
 }
 
+// 不在安全点(safepoint)的偏向锁撤销逻辑.
 void BiasedLocking::revoke(Handle obj, TRAPS) {
   assert(!SafepointSynchronize::is_at_safepoint(), "must not be called while at safepoint");
 
+  // 通过 while 循环去撤销偏向锁.
   while (true) {
     // We can revoke the biases of anonymously-biased objects
     // efficiently enough that we should not cause these revocations to
     // update the heuristics because doing so may cause unwanted bulk
     // revocations (which are expensive) to occur.
     markWord mark = obj->mark();
-    // 如果未开启偏向, 则无需进行偏向锁撤销操作, 此时直接退出.
+    // 1. 如果未开启偏向, 则无需进行偏向锁撤销操作, 此时直接退出.
     if (!mark.has_bias_pattern()) {
       return;
     }
-    // 如果是匿名偏向, 尝试直接通过 CAS 更新锁对象 mark word, 更新后 mark word 格式变为无锁状态（偏向锁位将为 0）.
+    // 2. 如果是匿名偏向, 尝试通过 CAS 更新锁对象 mark word 为原型(prototype)值
+    // (未开启偏向锁时每个 Java 对象 mark word 的初始值便是该值, 该值偏向锁位为 0, 且不记录除分代年龄外的其他信息）.
     if (mark.is_biased_anonymously()) {
       // We are probably trying to revoke the bias of this object due to
       // an identity hash code computation. Try to revoke the bias
@@ -785,16 +811,17 @@ void BiasedLocking::revoke(Handle obj, TRAPS) {
       markWord biased_value       = mark;
       markWord unbiased_prototype = markWord::prototype().set_age(mark.age());
       markWord res_mark = obj->cas_set_mark(unbiased_prototype, mark);
+      // CAS 成功直接退出.
       if (res_mark == biased_value) {
         return;
       }
       mark = res_mark;  // Refresh mark with the latest value.
     }
-    // 如果已偏向其他线程.
+    // 3. 如果已偏向其他线程.
     else {
       Klass* k = obj->klass();
       markWord prototype_header = k->prototype_header();
-      // 如果锁对象 Class 类未开启偏向, 尝试通过 CAS 将锁对数 mark word 更新为 Class 类的 mark word.
+      // 3.1 如果锁对象 Class 类未开启偏向, 尝试通过 CAS 将锁对应 mark word 更新为 Class 类的 mark word, 不管成功与否都直接退出.
       if (!prototype_header.has_bias_pattern()) {
         // This object has a stale bias from before the bulk revocation
         // for this data type occurred. It's pointless to update the
@@ -802,14 +829,13 @@ void BiasedLocking::revoke(Handle obj, TRAPS) {
         // CAS. If we fail this race, the object's bias has been revoked
         // by another thread so we simply return and let the caller deal
         // with it.
-        // 此数据类型批量撤销之前锁对象有一个过期的偏向,
-        // 在这一点上启发式更新是没有意义的，因此只需使用 CAS 更新 mark word 即可。
+        // 此对象在发生此数据类型的批量撤销之前存在过期的偏向, 此时无需进行启发式更新, 只需使用 CAS 更新 mark word 即可.
         // 如果失败了，那么对象的偏向已经被另一个线程撤销了，所以只需返回并让调用者处理它.
         obj->cas_set_mark(prototype_header.set_age(mark.age()), mark);
         assert(!obj->mark().has_bias_pattern(), "even if we raced, should still be revoked");
         return;
       }
-      // 如果 Class 类 epoch 值与锁对象 epoch 值不同, 
+      // 3.2 如果 Class 类 epoch 值与锁对象 epoch 值不同, 尝试通过 CAS 更新更新锁对象 mark word 为原型值, 更新成功直接返回.
       else if (prototype_header.bias_epoch() != mark.bias_epoch()) {
         // The epoch of this biasing has expired indicating that the
         // object is effectively unbiased. We can revoke the bias of this
@@ -830,11 +856,13 @@ void BiasedLocking::revoke(Handle obj, TRAPS) {
       }
     }
 
+    // 4. 根据偏向锁已偏向的次数和最后一次偏向时间来更新启发式结果.
     HeuristicsResult heuristics = update_heuristics(obj());
+    // 4.1 未开启偏向直接返回.
     if (heuristics == HR_NOT_BIASED) {
       return;
     } 
-    // 单个偏向锁撤销逻辑.
+    // 4.2 单个偏向锁撤销逻辑.
     else if (heuristics == HR_SINGLE_REVOKE) {
       JavaThread *blt = mark.biased_locker();
       assert(blt != NULL, "invariant");
@@ -850,7 +878,9 @@ void BiasedLocking::revoke(Handle obj, TRAPS) {
         // 在这种情况下，因为只遍历线程自己的栈，因此可以不在安全点(safepoint)执行.
         EventBiasedLockSelfRevocation event;
         ResourceMark rm;
+        // 遍历线程堆栈撤销偏向锁.
         walk_stack_and_revoke(obj(), blt);
+        // 将缓存的 MonitorInfo 设置为 NULL.
         blt->set_cached_monitor_info(NULL);
         assert(!obj->mark().has_bias_pattern(), "invariant");
         if (event.should_commit()) {
@@ -865,7 +895,7 @@ void BiasedLocking::revoke(Handle obj, TRAPS) {
         }
       }
     }
-    // 偏向锁批量撤销逻辑，需要批量撤销的场景如下：
+    // 4.3 偏向锁批量撤销逻辑，需要批量撤销的场景如下：
     // * 锁对象 Class 类 epoch 值发生变动该类对应所有实例上的偏向锁此时都已过期，需要撤销.
     // * 偏向锁撤销次数超过一定阀值后需要进行锁升级，此时需要撤销偏向锁.
     else {

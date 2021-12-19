@@ -60,10 +60,13 @@ class BasicLock {
 // alignment of the embedded BasicLock objects on such machines, we
 // put the embedded BasicLock at the beginning of the struct.
 
+// 基础对象锁信息.
 class BasicObjectLock {
   friend class VMStructs;
  private:
+  // 锁信息，锁信息中主要包含 mark word.
   BasicLock _lock;                                    // the lock, must be double word aligned
+  // 锁对象.
   oop       _obj;                                     // object holds the lock;
 
  public:

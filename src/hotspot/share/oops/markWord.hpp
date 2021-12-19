@@ -138,8 +138,8 @@ class markWord {
   static const int hash_shift                     = unused_gap_shift + unused_gap_bits;
   static const int epoch_shift                    = hash_shift;
 
-  static const uintptr_t lock_mask                = right_n_bits(lock_bits);
-  static const uintptr_t lock_mask_in_place       = lock_mask << lock_shift;
+  static const uintptr_t lock_mask                = right_n_bits(lock_bits); // 10 进制 3, 二进制 11 
+  static const uintptr_t lock_mask_in_place       = lock_mask << lock_shift; // 10 进制 3, 二进制 11 
   static const uintptr_t biased_lock_mask         = right_n_bits(lock_bits + biased_lock_bits);
   static const uintptr_t biased_lock_mask_in_place= biased_lock_mask << lock_shift;
   static const uintptr_t biased_lock_bit_in_place = 1 << biased_lock_shift;
@@ -303,6 +303,7 @@ class markWord {
   }
   // the following two functions create the markWord to be
   // stored into object header, it encodes monitor info
+  // 返回的 makr word 格式：62 bit(指针地址) + 11（2 bit, 固定）
   static markWord encode(BasicLock* lock) {
     return from_pointer(lock);
   }
@@ -322,6 +323,8 @@ class markWord {
   markWord clear_lock_bits() { return markWord(value() & ~lock_mask_in_place); }
 
   // age operations
+  // ~lock_mask_in_place 值为 1111....1100.
+  // set_marked 作用: 将 markWord 前 62 bit 保留, 并将最后两位设置为 11(二进制).
   markWord set_marked()   { return markWord((value() & ~lock_mask_in_place) | marked_value); }
   markWord set_unmarked() { return markWord((value() & ~lock_mask_in_place) | unlocked_value); }
 

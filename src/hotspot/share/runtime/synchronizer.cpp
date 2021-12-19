@@ -278,6 +278,9 @@ void ObjectSynchronizer::enter(Handle obj, BasicLock* lock, TRAPS) {
   markWord mark = obj->mark();
   assert(!mark.has_bias_pattern(), "should not see bias pattern here");
 
+  // 如果无锁则
+  // * 将 Lock Record（BasicLock）的 displaced header 设置为锁对象 mark word.
+  // * 尝试通过 CAS 将 Lock Record 指针地址保存到锁对象 mark word 中, 成功直接返回.
   if (mark.is_neutral()) {
     // Anticipate successful CAS -- the ST of the displaced mark must
     // be visible <= the ST performed by the CAS.
@@ -286,7 +289,9 @@ void ObjectSynchronizer::enter(Handle obj, BasicLock* lock, TRAPS) {
       return;
     }
     // Fall through to inflate() ...
-  } else if (mark.has_locker() &&
+  } 
+  // 如果有锁且锁被当前线程持有则将 Lock Record 的 displaced header设置为 000000....00011(即清除中记录的线程 ID) 然后直接返回.
+  else if (mark.has_locker() &&
              THREAD->is_lock_owned((address)mark.locker())) {
     assert(lock != mark.locker(), "must not re-lock the same lock");
     assert(lock != (BasicLock*)obj->mark().value(), "don't relock with same BasicLock");
@@ -298,6 +303,7 @@ void ObjectSynchronizer::enter(Handle obj, BasicLock* lock, TRAPS) {
   // so it does not matter what the value is, except that it
   // must be non-zero to avoid looking like a re-entrant lock,
   // and must not look locked either.
+  // 将 Lock Record displaced header 设置为 000000..000（即锁膨胀中）.
   lock->set_displaced_header(markWord::unused_mark());
   inflate(THREAD, obj(), inflate_cause_monitor_enter)->enter(THREAD);
 }
