@@ -1783,7 +1783,7 @@ run:
         // BasicObjectLock 或称为 Lock Record，用于记录锁信息, 在轻量级锁中有使用, 
         //   其定义在 src\hotspot\share\runtime\basicLock.hpp 中
         // BasicObjectLock 包含一个 BasicLock 类型 _lock 对象和一个指向 Object 对象的指针 _obj,
-        // * BasicLock 类型对象主要用来保存 _obj 所指向的 Object 对象的对象头（mark word）数据
+        // * BasicLock 中包含一个称为 desplaced header 的变量，该变量用于记录 _obj 所指向的 Object 对象的对象头（mark word）的原始值.
 
         // 1. 在当前线程堆栈上找到一个可用的  BasicObjectLock
         BasicObjectLock* limit = istate->monitor_base();
@@ -1838,7 +1838,7 @@ run:
               // 通过 CAS 尝试撤销偏向锁.
               if (lockee->cas_set_mark(header, mark) == mark) {
                 if (PrintBiasedLockingStatistics)
-                  (*BiasedLocking::revoked_lock_entry_count_addr())++;
+                  (*BiasedLocking::revoked_lock_entry_count_addr())++;  
               }
             }
             // 3.3 如果锁对象 epoch 值与 Class 类 epoch 不同则表示当前偏向锁已过期, 此时需要重新偏向.
