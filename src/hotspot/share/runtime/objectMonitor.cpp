@@ -275,6 +275,7 @@ void ObjectMonitor::enter(TRAPS) {
   // transitions.  The following spin is strictly optional ...
   // Note that if we acquire the monitor from an initial spin
   // we forgo posting JVMTI events and firing DTRACE probes.
+  // 尝试进行自适应自旋.
   if (TrySpin(Self) > 0) {
     assert(_owner == Self, "must be Self: owner=" INTPTR_FORMAT, p2i(_owner));
     assert(_recursions == 0, "must be 0: recursions=" INTX_FORMAT, _recursions);
@@ -1589,6 +1590,7 @@ void ObjectMonitor::notifyAll(TRAPS) {
 // not spinning.
 
 // Spinning: Fixed frequency (100%), vary duration
+// 自适应自旋.
 int ObjectMonitor::TrySpin(Thread * Self) {
   // Dumb, brutal spin.  Good for comparative measurements against adaptive spinning.
   int ctr = Knob_FixedSpin;
@@ -1650,6 +1652,10 @@ int ObjectMonitor::TrySpin(Thread * Self) {
   // 2.  Spin failure with prejudice
   // 3.  Spin failure without prejudice
 
+  //有三种方法可以退出以下循环：
+  // 1. 自旋时此线程成功获得锁.
+  // 2. 带偏向的自旋失败.
+  // 3. 无偏向的自旋失败.
   while (--ctr >= 0) {
 
     // Periodic polling -- Check for pending GC

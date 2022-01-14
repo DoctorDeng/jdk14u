@@ -263,7 +263,16 @@ class markWord {
   markWord set_unlocked() const {
     return markWord(value() | unlocked_value);
   }
+  // 为 true  时 value 值为 0, 此时需要进行锁膨胀操作.
+  // 为 false 时 value 值不为 0.
   bool has_locker() const {
+    // C++ 中 0 表示假即 false, 非 0 表示真, 即 true.
+    // locked_value 值为 0
+    // lock_mask_in_place 值为 0b11(c++ 0b 表示二进制, 此处值对应十进制 3)
+    // & 运算符: 如果相对应位都是 1，则结果为 1，否则为 0
+
+    // value & 11 == 0 为 true 时 value 值为 0000000000..00 (十进制 0)
+    //                 为 false 时 value 值不为 00..00
     return ((value() & lock_mask_in_place) == locked_value);
   }
   BasicLock* locker() const {

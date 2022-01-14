@@ -303,8 +303,9 @@ void ObjectSynchronizer::enter(Handle obj, BasicLock* lock, TRAPS) {
   // so it does not matter what the value is, except that it
   // must be non-zero to avoid looking like a re-entrant lock,
   // and must not look locked either.
-  // 将 Lock Record displaced header 设置为 000000..000（即锁膨胀中）.
+  // 将 Lock Record displaced header 设置为 000000..0011（即被标记中）.
   lock->set_displaced_header(markWord::unused_mark());
+  // 进行锁膨胀, 获取 ObjectMonitor 并执行其 enter 方法.
   inflate(THREAD, obj(), inflate_cause_monitor_enter)->enter(THREAD);
 }
 
@@ -541,19 +542,27 @@ struct SharedGlobals {
 static SharedGlobals GVars;
 static int _forceMonitorScavenge = 0; // Scavenge required and pending
 
+// 调用 read_stable_mark 方法的线程会在 for 循环中等待锁膨胀完成.
 static markWord read_stable_mark(oop obj) {
   markWord mark = obj->mark();
+  // 如果锁不在膨胀中, 即 markWord 值为 0(二进制 000000....000 ) 直接返回.
   if (!mark.is_being_inflated()) {
     return mark;       // normal fast-path return
   }
 
   int its = 0;
+  // 通过 for 循环开始轮询.
   for (;;) {
     markWord mark = obj->mark();
+    // 锁膨胀状态检查.
     if (!mark.is_being_inflated()) {
       return mark;    // normal fast-path return
     }
 
+    // 这个 Object 正则被其他线程膨胀(膨胀).
+    // 调用 read_stable_mark() 方法当前线程必须等待膨胀完成.
+    // 避免 live-lock(活锁).
+    //
     // The object is being inflated by some other thread.
     // The caller of read_stable_mark() must wait for inflation to complete.
     // Avoid live-lock
@@ -565,6 +574,10 @@ static markWord read_stable_mark(oop obj) {
     // TODO: restrict the aggregate number of spinners.
 
     ++its;
+    // 当循环次数小于 10000 且系统架构是 MP 时通过自旋的方式进行等待.
+    // 当循环次数大于 10000 或系统架构不是 MP 时：
+    // * 如果 its 为基数则通过操作系统方法直接释放 CPU 使用权.
+    // * 如果 its 为偶数则在另一个循环中(终止条件为 markWord 状态不为锁膨胀中)通过 spin(自旋)/yield(释放 CPU 使用权)/block(阻塞当前线程) 等混合的方式循环等待
     if (its > 10000 || !os::is_MP()) {
       if (its & 1) {
         os::naked_yield();
@@ -1293,6 +1306,7 @@ void ObjectSynchronizer::inflate_helper(oop obj) {
   inflate(Thread::current(), obj, inflate_cause_vm_internal);
 }
 
+// 锁膨胀入口, 调用该方法完成无锁或轻量级锁 -> 重量级锁 的膨胀操作, 并返回重量级锁实现中的 ObjectMonitor.
 ObjectMonitor* ObjectSynchronizer::inflate(Thread* self,
                                            oop object,
                                            const InflateCause cause) {
@@ -1307,6 +1321,13 @@ ObjectMonitor* ObjectSynchronizer::inflate(Thread* self,
     const markWord mark = object->mark();
     assert(!mark.has_bias_pattern(), "invariant");
 
+    // markWord 处于以下状态之一：
+    // * Inflated -      锁已膨胀为重量级锁, 此时直接返回锁对象对应的 ObjectMonitor.
+    // * INFLATING -     锁膨胀中, 当前线程會在一个循环中通过 spin(自旋)/yeild(主动释放 CPU 使用权)/park(阻塞当前线程) 等混合的方式忙等待直到膨胀完成.
+    // * Stack-locked -  锁为轻量级锁, 直接进行锁膨胀操作.
+    // * Neutral -       无锁状态, 直接进行膨胀操作.
+    // * BIASED -        永远不会处于该状态, 该状态非法.
+
     // The mark can be in one of the following states:
     // *  Inflated     - just return
     // *  Stack-locked - coerce it to inflated
@@ -1315,6 +1336,7 @@ ObjectMonitor* ObjectSynchronizer::inflate(Thread* self,
     // *  BIASED       - Illegal.  We should never see this
 
     // CASE: inflated
+    // 锁已膨胀完成, 是重量级锁. 此时获取 markWord 中记录的 ObjectMonitor 然后直接返回.
     if (mark.has_monitor()) {
       ObjectMonitor* inf = mark.monitor();
       markWord dmw = inf->header();
@@ -1324,27 +1346,44 @@ ObjectMonitor* ObjectSynchronizer::inflate(Thread* self,
       return inf;
     }
 
+    // 锁膨胀中: 在 stack-lock 上进行膨胀.
+    // 其他一些线程正在将 stack-lock 转换为膨胀状态. 但是只有一个线程可以完成膨胀——其他线程必须等待.
+    // INFLATING 值是瞬时的. 
+    // 目前，通过 spin(自旋)/yield(释放 CPU 使用权))/park(阻塞) 轮询查询 markWord，一直到膨胀结束.
+    // 可以通过将线程 parking (阻塞)在一些辅助列表上来消除轮询.
     // CASE: inflation in progress - inflating over a stack-lock.
     // Some other thread is converting from stack-locked to inflated.
     // Only that thread can complete inflation -- other threads must wait.
     // The INFLATING value is transient.
     // Currently, we spin/yield/park and poll the markword, waiting for inflation to finish.
     // We could always eliminate polling by parking the thread on some auxiliary list.
+    
+    // mark == markWord::INFLATING() 即锁正在膨胀中, 当前线程需要进行等待直到膨胀完成.
+    // 等待操作通过调用 read_stable_mark 方法完成, 该方法会通过 spin(自旋)/yield(释放 CPU 使用权))/park(阻塞) 等混合方式让当前线程进行等待知道锁膨胀完成.
+    // 注：markWord::INFLATING() 为 _value 为 0 的 markWord.
     if (mark == markWord::INFLATING()) {
       read_stable_mark(object);
       continue;
     }
 
     // CASE: stack-locked
+    // 可能被此线程或其他线程锁定堆栈.
     // Could be stack-locked either by this thread or by some other thread.
     //
+    // 请注意，我们可以引用地分配 ObjectMonitor，然后尝试将 INFLATING 安装到 markWord 中.
+    // 我们最初安装 INFLATING，分配 ObjectMonitor，然后最后将 ObjectMonitor 的地址定向到标记中。 这是正确的，但人为延长了膨胀在标记中的间隔，从而提高了通胀争用的几率
     // Note that we allocate the objectmonitor speculatively, _before_ attempting
     // to install INFLATING into the mark word.  We originally installed INFLATING,
     // allocated the objectmonitor, and then finally STed the address of the
     // objectmonitor into the mark.  This was correct, but artificially lengthened
     // the interval in which INFLATED appeared in the mark, thus increasing
     // the odds of inflation contention.
-    //
+
+
+    // 我们现在使用每线程私有ObjectMonitor免费列表。 这些列表从临界膨胀范围内的全局免费列表中重新传输。 线程可以将多个Objecmonitors en-Mass传输到全局免费列表到其本地免费列表。 这减少了一致性流量和锁定全局免费列表的争用。
+    // 使用此类本地免费列表，如果出现om_alloc（）调用并不重要
+    // 在 CAS(INFLATING) 操作之前或之后。
+    // 查看om_alloc（）中的注释
     // We now use per-thread private objectmonitor free lists.
     // These list are reprovisioned from the global free list outside the
     // critical INFLATING...ST interval.  A thread can transfer
@@ -1356,7 +1395,10 @@ ObjectMonitor* ObjectSynchronizer::inflate(Thread* self,
 
     LogStreamHandle(Trace, monitorinflation) lsh;
 
+    // 如果是轻量级锁, 则直接执行锁膨胀操作.
+    // 注：mark.has_locker() 为 true 时 markWord 值为 0.
     if (mark.has_locker()) {
+      // 调用操作系统接口分配 ObjectMonitor.
       ObjectMonitor* m = om_alloc(self);
       // Optimistically prepare the objectmonitor - anticipate successful CAS
       // We do this before the CAS in order to minimize the length of time
@@ -1365,11 +1407,19 @@ ObjectMonitor* ObjectSynchronizer::inflate(Thread* self,
       m->_Responsible  = NULL;
       m->_SpinDuration = ObjectMonitor::Knob_SpinLimit;   // Consider: maintain by type/class
 
+      // 通过 CAS 将 markWord 设置为 markWord::INFLATING() 让其他线程知晓锁正在膨胀.
       markWord cmp = object->cas_set_mark(markWord::INFLATING(), mark);
+      // CAS 失败则可能其他线程执行了该操作, 释放已分配的 ObjectMonitor.
       if (cmp != mark) {
         om_release(self, m, true);
         continue;       // Interference -- just retry
       }
+
+      // CAS 成功则当前线程执行锁膨胀工作.
+
+      // 当成功将 INFLATING(0) 安装到 markWord 中(即 markWord 最后 2bit 设置为 00) 时,
+      // 这是 0 出现在 makrWord 中的的唯一情况. 
+      // 只有成功将 INFLATING(0) 安装到 markWord 的线程才可以执行锁的膨胀工作.
 
       // We've successfully installed INFLATING (0) into the mark-word.
       // This is the only case where 0 will appear in a mark-word.
@@ -1396,6 +1446,10 @@ ObjectMonitor* ObjectSynchronizer::inflate(Thread* self,
       // Critically, while object->mark is 0 mark.displaced_mark_helper() is stable.
       // 0 serves as a "BUSY" inflate-in-progress indicator.
 
+      // 如下代码执行具体的锁膨胀工作, 核心操作如下:
+      // * 将 ObjectMonitor 与锁对象(object)关联.
+      // * 将 ObjectMonitor 持有者(owner) 设置为当前线程.
+      // * markWord 中记录 ObjectMonitor 地址.
 
       // fetch the displaced mark from the owner's stack.
       // The owner can't die or unwind past the lock while our INFLATING
@@ -1425,6 +1479,7 @@ ObjectMonitor* ObjectSynchronizer::inflate(Thread* self,
 
       // Hopefully the performance counters are allocated on distinct cache lines
       // to avoid false sharing on MP systems ...
+      // 希望在不同的缓存行(Cache Line)上分配性能计数器，以避免 MP 系统上的错误共享.
       OM_PERFDATA_OP(Inflations, inc());
       if (log_is_enabled(Trace, monitorinflation)) {
         ResourceMark rm(self);
@@ -1433,6 +1488,7 @@ ObjectMonitor* ObjectSynchronizer::inflate(Thread* self,
                      object->mark().value(), object->klass()->external_name());
       }
       if (event.should_commit()) {
+        // 发送锁膨胀完成事件.
         post_monitor_inflate_event(&event, object, cause);
       }
       return m;
@@ -1449,6 +1505,10 @@ ObjectMonitor* ObjectSynchronizer::inflate(Thread* self,
 
     // Catch if the object's header is not neutral (not locked and
     // not marked is what we care about here).
+
+    // CASE: neutral 处于无锁状态. 此时 markWord 值格式为:  [header      | 0 | 01]  unlocked 
+    // 在无锁状态下直接调用操作系统接口申请锁, 并创建 ObjectMonitor 对象
+    // 然后将 ObjectMonitor 地址存储在 markWord 中.
     assert(mark.is_neutral(), "invariant: header=" INTPTR_FORMAT, mark.value());
     ObjectMonitor* m = om_alloc(self);
     // prepare m for installation - set monitor to initial state
@@ -1458,7 +1518,9 @@ ObjectMonitor* ObjectSynchronizer::inflate(Thread* self,
     m->_Responsible  = NULL;
     m->_SpinDuration = ObjectMonitor::Knob_SpinLimit;       // consider: keep metastats by type/class
 
+    // 将 ObjectMonitor 地址存储在 markWord 中, 此时 markWord 格式为:  [ptr  | 10]  monitor            inflated lock (header is wapped out)
     if (object->cas_set_mark(markWord::encode(m), mark) != mark) {
+      // 设置失败时执行清理操作.
       m->set_header(markWord::zero());
       m->set_object(NULL);
       m->Recycle();
