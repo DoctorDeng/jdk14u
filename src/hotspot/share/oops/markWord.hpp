@@ -132,11 +132,11 @@ class markWord {
   // The biased locking code currently requires that the age bits be
   // contiguous to the lock bits.
   static const int lock_shift                     = 0;
-  static const int biased_lock_shift              = lock_bits;
-  static const int age_shift                      = lock_bits + biased_lock_bits;
-  static const int unused_gap_shift               = age_shift + age_bits;
-  static const int hash_shift                     = unused_gap_shift + unused_gap_bits;
-  static const int epoch_shift                    = hash_shift;
+  static const int biased_lock_shift              = lock_bits; // 值 2
+  static const int age_shift                      = lock_bits + biased_lock_bits; // 值 3
+  static const int unused_gap_shift               = age_shift + age_bits; // 值 7
+  static const int hash_shift                     = unused_gap_shift + unused_gap_bits; // 值 7 或 8, 通常是 8
+  static const int epoch_shift                    = hash_shift; // 值 7 或 8, 通常是 8
 
   static const uintptr_t lock_mask                = right_n_bits(lock_bits); // 10 进制 3, 二进制 11 
   static const uintptr_t lock_mask_in_place       = lock_mask << lock_shift; // 10 进制 3, 二进制 11 
