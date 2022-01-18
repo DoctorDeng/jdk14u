@@ -1785,7 +1785,7 @@ run:
         // BasicObjectLock 包含一个 BasicLock 类型 _lock 对象和一个指向 Object 对象的指针 _obj,
         // * BasicLock 中包含一个称为 desplaced header 的变量，该变量用于记录 _obj 所指向的 Object 对象的对象头（mark word）的原始值.
 
-        // 1. 在当前线程堆栈上找到一个可用的  BasicObjectLock
+        // 1. 在当前线程堆栈上找到一个可用的  BasicObjectLock 即 Lock Record.
         BasicObjectLock* limit = istate->monitor_base();
         BasicObjectLock* most_recent = (BasicObjectLock*) istate->stack_base();
         BasicObjectLock* entry = NULL;
