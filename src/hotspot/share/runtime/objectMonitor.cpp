@@ -239,24 +239,27 @@ void ObjectMonitor::operator delete[] (void *p) {
 
 // -----------------------------------------------------------------------------
 // Enter support
-
+// 重量级锁获取入口.
 void ObjectMonitor::enter(TRAPS) {
   // The following code is ordered to check the most common cases first
   // and to reduce RTS->RTO cache line upgrades on SPARC and IA32 processors.
   Thread * const Self = THREAD;
 
+  // 1. 尝试通过 CAS 将 monitor 拥有者设置为当前线程.
   void * cur = Atomic::cmpxchg(&_owner, (void*)NULL, Self);
+  // 1.1 设置成功即成功获取到 monitor, 此时直接返回.
   if (cur == NULL) {
     assert(_recursions == 0, "invariant");
     return;
   }
-
+  // 1.2 如果当前线程已拥有 monitor， 则将计数重入次数 +1.
   if (cur == Self) {
     // TODO-FIXME: check for integer overflow!  BUGID 6557169.
     _recursions++;
     return;
   }
 
+  // 1.2 如果当前线程第一次进入 monitor 则将 _ower 设置为当前线程并将重入次数设置为 1.
   if (Self->is_lock_owned((address)cur)) {
     assert(_recursions == 0, "internal state error");
     _recursions = 1;
@@ -400,14 +403,17 @@ void ObjectMonitor::enter(TRAPS) {
 
 // Caveat: TryLock() is not necessarily serializing if it returns failure.
 // Callers must compensate as needed.
-
+// 尝试获取锁(即 ObjectMonitor)
 int ObjectMonitor::TryLock(Thread * Self) {
+  // 如果 ObjectMonitor 被其他线程持有, 返回 0.
   void * own = _owner;
   if (own != NULL) return 0;
+  // 尝试通过 CAS 将 _owner 设置为当前线程, 成功返回 1.
   if (Atomic::replace_if_null(&_owner, Self)) {
     assert(_recursions == 0, "invariant");
     return 1;
   }
+  // 获取锁失败返回 -1.
   // The lock had been free momentarily, but we lost the race to the lock.
   // Interference -- the CAS failed.
   // We can either return -1 or retry.
@@ -432,6 +438,7 @@ void ObjectMonitor::EnterI(TRAPS) {
   assert(((JavaThread *) Self)->thread_state() == _thread_blocked, "invariant");
 
   // Try the lock - TATAS
+  // 1. 尝试通过 CAS 获取锁, 如果成功直接返回.
   if (TryLock (Self) > 0) {
     assert(_succ != Self, "invariant");
     assert(_owner == Self, "invariant");
@@ -447,7 +454,7 @@ void ObjectMonitor::EnterI(TRAPS) {
   // operation to donate the remainder of this thread's quantum
   // to the owner.  This has subtle but beneficial affinity
   // effects.
-
+  // 2. CAS 获取锁失败, 再尝试通过置自适应自旋获取锁, 如果成功直接返回.
   if (TrySpin(Self) > 0) {
     assert(_owner == Self, "invariant");
     assert(_succ != Self, "invariant");
@@ -456,6 +463,7 @@ void ObjectMonitor::EnterI(TRAPS) {
   }
 
   // The Spin failed -- Enqueue and park the thread ...
+  // 3. 如果通过 CAS 和自适应自旋(spin) 尝试获取锁都失败, 则将线程入队到 _cxq 中, 并 park(休眠) 该线程
   assert(_succ != Self, "invariant");
   assert(_owner != Self, "invariant");
   assert(_Responsible != Self, "invariant");
@@ -478,11 +486,14 @@ void ObjectMonitor::EnterI(TRAPS) {
   // Once on cxq/EntryList, Self stays on-queue until it acquires the lock.
   // Note that spinning tends to reduce the rate at which threads
   // enqueue and dequeue on EntryList|cxq.
+
+  // 将 "Self"(当前线程) 入队到 _cxq 队列头部. 一旦进入 cxq/EntryList，self 就会一直在队列中，直到它获得锁为止.
+  // 注意：自旋会降低线程在 EntryList|cxq 上入队和出队的速率.
   ObjectWaiter * nxt;
   for (;;) {
     node._next = nxt = _cxq;
     if (Atomic::cmpxchg(&_cxq, nxt, &node) == nxt) break;
-
+    // 如果入队失败, 则表示 _cxq 队列发生了变化, 在重试前尝试通过 CAS 获取锁.
     // Interference - the CAS failed because _cxq changed.  Just retry.
     // As an optional optimization we retry the lock.
     if (TryLock (Self) > 0) {
@@ -515,7 +526,15 @@ void ObjectMonitor::EnterI(TRAPS) {
   // successors where there was risk of stranding.  This would help eliminate the
   // timer scalability issues we see on some platforms as we'd only have one thread
   // -- the checker -- parked on a timer.
+  // 3. 检查 cxq|EntryList 边缘为非空. 如果非空则表示存在竞争.
+  // 当一直有竞争时，退出线程将使用 ST:MEMBAR:LD 1-1 退出协议.
+  // 当竞争减弱时退出操作恢复到更快的 1-0 模式. 此操作可能会交错(竞争)并发的 1-0 退出操作，导致搁浅，因此
+  // 安排一个争用线程使用 timed park() 操作检测并从竞争中恢复.(搁浅是进步失败的一种形式 monitor 已解锁，但所有争用线程仍处于 parked 状态.)
 
+  // 至少有一个争用线程将定期轮询 _owner. 其中一个争用线程将成为指定的 "负责线程"(responsible thread)。
+  // 负责线程使用 timed park() ，而不是正常的无限 park 操作--它定期唤醒、检查 1-0 exit 操作允许的潜在搁浅(stranding)并从中恢复
+  // 在任意时刻，每个 monitor 最多需要一个负责线程。只有 cxq|EntryList 上的线程才能负责 monitor.
+  // 目前，其中一个争用线程承担了 "Responsible(负责)" 的新增角色.
   if (nxt == NULL && _EntryList == NULL) {
     // Try to assume the role of responsible thread for the monitor.
     // CONSIDER:  ST vs CAS vs { if (Responsible==null) Responsible=Self }
@@ -533,6 +552,10 @@ void ObjectMonitor::EnterI(TRAPS) {
   // to defer the state transitions until absolutely necessary,
   // and in doing so avoid some transitions ...
 
+  // 此线程将自身添加到 _cxq 对列中时, 锁可能已被释放.
+  // 停止竞争，避免 "stranding(搁浅)" 和 progress-liveness(进程活跃) 失败且在 park 前必须重新采样 _owner.
+  // 请注意 Dekker/Lamport 的二元性：St cxq；MEMBAR；LD Owner.
+  // 在本例中，ST-MEMBAR 由 CAS() 完成.
   int nWakeups = 0;
   int recheckInterval = 1;
 
@@ -542,6 +565,7 @@ void ObjectMonitor::EnterI(TRAPS) {
     assert(_owner != Self, "invariant");
 
     // park self
+    // 如果是负责线程(responsible thread)
     if (_Responsible == Self) {
       Self->_ParkEvent->park((jlong) recheckInterval);
       // Increase the recheckInterval, but clamp the value.
@@ -1590,10 +1614,13 @@ void ObjectMonitor::notifyAll(TRAPS) {
 // not spinning.
 
 // Spinning: Fixed frequency (100%), vary duration
-// 自适应自旋.
+// 尝试通过自旋获取锁. 自旋方式有两种：
+// 1. 固定次数自旋.
+// 2. 自适应自旋((Adaptive Spinning).
 int ObjectMonitor::TrySpin(Thread * Self) {
   // Dumb, brutal spin.  Good for comparative measurements against adaptive spinning.
   int ctr = Knob_FixedSpin;
+  // 1. 如果是固定次数的自旋, 则自旋固定的次数(由 Knob_FixedSpin 确定), 自旋过程中通过 CAS 尝试获取锁.
   if (ctr != 0) {
     while (--ctr >= 0) {
       if (TryLock(Self) > 0) return 1;
@@ -1602,14 +1629,19 @@ int ObjectMonitor::TrySpin(Thread * Self) {
     return 0;
   }
 
+  // 2. 预自旋 Knob_PreSpin + 1 次, 如果成功增加 _SpinDuration（自旋次数）然后返回.
+  // Knob_PreSpin 初始值 10.
   for (ctr = Knob_PreSpin + 1; --ctr >= 0;) {
     if (TryLock(Self) > 0) {
       // Increase _SpinDuration ...
       // Note that we don't clamp SpinDuration precisely at SpinLimit.
       // Raising _SpurDuration to the poverty line is key.
       int x = _SpinDuration;
+      // 自旋次数不能超过 Knob_SpinLimit(5000).
       if (x < Knob_SpinLimit) {
+        // 自旋次数最低值为 Knob_Poverty(1000) .
         if (x < Knob_Poverty) x = Knob_Poverty;
+        // 自旋成功时, 自旋次数一次增加 Knob_BonusB(100) .
         _SpinDuration = x + Knob_BonusB;
       }
       return 1;
@@ -1631,9 +1663,22 @@ int ObjectMonitor::TrySpin(Thread * Self) {
   // This takes us into the realm of 1-out-of-N spinning, where we
   // hold the duration constant but vary the frequency.
 
-  ctr = _SpinDuration;
-  if (ctr <= 0) return 0;
+  // 准入控制 - 验证自旋的前提条件.
+  // 
+  // 我们总是旋转一点，只是为了防止 _SpinDuration(旋转持续时间) == 0 成为一种吸引人的状态. 
+  // 换句话说，我们简单地旋转到示例，以防系统加载、并行、争用或锁定形态改变.
+  // 考虑以下替代方案：
 
+  // 定期设置 _spinduration = _spinlimit 并尝试长/完全自旋. "定期"可能意味着在失败的自旋尝试（或迭代）的故障 ＃ 的计数之后达到一些阈值.
+  // 这将我们带入 1-Out-N 的自旋，在那里自旋时间固定, 但改变频率.
+  //
+
+  // 3. 根据 _SpinDuration (自旋次数)进行自适应自旋.
+  ctr = _SpinDuration;
+  // 3.1 如果自旋次数小于等于 0 直接退出.
+  if (ctr <= 0) return 0;
+  // 3.2 如果线程不是 java 线程或 VM 线程或 _owner 未运行, 直接返回.
+  //     当获取锁的线程未运行时通过自旋方式获取锁没有任何意义, 因为锁不会被释放.
   if (NotRunnable(Self, (Thread *) _owner)) {
     return 0;
   }
@@ -1653,9 +1698,10 @@ int ObjectMonitor::TrySpin(Thread * Self) {
   // 3.  Spin failure without prejudice
 
   //有三种方法可以退出以下循环：
-  // 1. 自旋时此线程成功获得锁.
+  // 1. 自旋期间此线程成功获得锁.
   // 2. 带偏向的自旋失败.
   // 3. 无偏向的自旋失败.
+  // 根据 _SpinDuration(自旋次数)进行自旋.
   while (--ctr >= 0) {
 
     // Periodic polling -- Check for pending GC
@@ -1667,6 +1713,11 @@ int ObjectMonitor::TrySpin(Thread * Self) {
     // this thread, if safe, doesn't steal cycles from GC.
     // This is in keeping with the "no loitering in runtime" rule.
     // We periodically check to see if there's a safepoint pending.
+
+    // JVM 不希望自旋线程延迟 JVM 到达 stop-the-world(STW) 安全点或窃取 GC 的周期.
+    //（a）如果线程不安全，则不会延迟安全点(safepoint).
+    //（b）如果线程安全，则不会窃取 GC 的周期.
+    // 因此这里会周期的检查, 让能够自旋的是不安全的线程.
     if ((ctr & 0xFF) == 0) {
       if (SafepointMechanism::should_block(Self)) {
         goto Abort;           // abrupt spin egress
@@ -1685,8 +1736,11 @@ int ObjectMonitor::TrySpin(Thread * Self) {
     // spin count-down variable "ctr", reducing it by 100, say.
 
     Thread * ox = (Thread *) _owner;
+    // 如果 monitor 未被获取, 尝试通过 CAS 获取锁.
+    // 获取成功则增加 _SpinDuration(自旋次数).
     if (ox == NULL) {
       ox = (Thread*)Atomic::cmpxchg(&_owner, (void*)NULL, Self);
+
       if (ox == NULL) {
         // The CAS succeeded -- this thread acquired ownership
         // Take care of some bookkeeping to exit spin state.
@@ -1719,6 +1773,7 @@ int ObjectMonitor::TrySpin(Thread * Self) {
     }
 
     // Did lock ownership change hands ?
+    // 当上次循环的 _owner 和此处循环不一样, 则表示期间锁被释放然后被其他线程获取, 此时直接退出. 
     if (ox != prv && prv != NULL) {
       goto Abort;
     }
@@ -1739,11 +1794,13 @@ int ObjectMonitor::TrySpin(Thread * Self) {
   // Spin failed with prejudice -- reduce _SpinDuration.
   // TODO: Use an AIMD-like policy to adjust _SpinDuration.
   // AIMD is globally stable.
+  // 带偏向的自旋失败, 减少磁选次数.
   {
     int x = _SpinDuration;
     if (x > 0) {
       // Consider an AIMD scheme like: x -= (x >> 3) + 100
       // This is globally sample and tends to damp the response.
+      // 自旋次数一次减少 Knob_Penalty(200).
       x -= Knob_Penalty;
       if (x < 0) x = 0;
       _SpinDuration = x;
