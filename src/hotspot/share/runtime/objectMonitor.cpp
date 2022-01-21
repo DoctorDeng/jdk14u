@@ -565,7 +565,7 @@ void ObjectMonitor::EnterI(TRAPS) {
     assert(_owner != Self, "invariant");
 
     // park self
-    // 如果是负责线程(responsible thread)
+    // 如果是负责线程(responsible thread)使用带超时时间的 park.
     if (_Responsible == Self) {
       Self->_ParkEvent->park((jlong) recheckInterval);
       // Increase the recheckInterval, but clamp the value.
@@ -574,9 +574,10 @@ void ObjectMonitor::EnterI(TRAPS) {
         recheckInterval = MAX_RECHECK_INTERVAL;
       }
     } else {
+      // 非负责线程(responsible thread) 使用 park 永久休眠(除非被唤醒).
       Self->_ParkEvent->park();
     }
-
+    // 再次尝试获取锁.
     if (TryLock(Self) > 0) break;
 
     // The lock is still contested.
@@ -587,6 +588,7 @@ void ObjectMonitor::EnterI(TRAPS) {
 
     // This PerfData object can be used in parallel with a safepoint.
     // See the work around in PerfDataManager::destroy().
+    // //锁仍处于争用状态记录无用唤醒次数.
     OM_PERFDATA_OP(FutileWakeups, inc());
     ++nWakeups;
 
@@ -605,6 +607,7 @@ void ObjectMonitor::EnterI(TRAPS) {
     if (_succ == Self) _succ = NULL;
 
     // Invariant: after clearing _succ a thread *must* retry _owner before parking.
+    // 不变量: 在清除 _succ 之后，线程 "必须" retry _owner 才能 park(停止).
     OrderAccess::fence();
   }
 
