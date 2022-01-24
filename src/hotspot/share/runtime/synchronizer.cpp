@@ -1323,7 +1323,7 @@ ObjectMonitor* ObjectSynchronizer::inflate(Thread* self,
 
     // markWord 处于以下状态之一：
     // * Inflated -      锁已膨胀为重量级锁, 此时直接返回锁对象对应的 ObjectMonitor.
-    // * INFLATING -     锁膨胀中, 当前线程會在一个循环中通过 spin(自旋)/yeild(主动释放 CPU 使用权)/park(阻塞当前线程) 等混合的方式忙等待直到膨胀完成.
+    // * INFLATING -     锁膨胀中, 当前线程會在一个循环中通过 spin(自旋)/yeild(主动释放 CPU 使用权)/park(休眠当前线程) 等混合的方式忙等待直到膨胀完成.
     // * Stack-locked -  锁为轻量级锁, 直接进行锁膨胀操作.
     // * Neutral -       无锁状态, 直接进行膨胀操作.
     // * BIASED -        永远不会处于该状态, 该状态非法.
@@ -1349,8 +1349,8 @@ ObjectMonitor* ObjectSynchronizer::inflate(Thread* self,
     // 锁膨胀中: 在 stack-lock 上进行膨胀.
     // 其他一些线程正在将 stack-lock 转换为膨胀状态. 但是只有一个线程可以完成膨胀——其他线程必须等待.
     // INFLATING 值是瞬时的. 
-    // 目前，通过 spin(自旋)/yield(释放 CPU 使用权))/park(阻塞) 轮询查询 markWord，一直到膨胀结束.
-    // 可以通过将线程 parking (阻塞)在一些辅助列表上来消除轮询.
+    // 目前，通过 spin(自旋)/yield(释放 CPU 使用权))/park(休眠) 轮询查询 markWord，一直到膨胀结束.
+    // 可以通过将线程 parking (休眠)在一些辅助列表上来消除轮询.
     // CASE: inflation in progress - inflating over a stack-lock.
     // Some other thread is converting from stack-locked to inflated.
     // Only that thread can complete inflation -- other threads must wait.
@@ -1359,7 +1359,7 @@ ObjectMonitor* ObjectSynchronizer::inflate(Thread* self,
     // We could always eliminate polling by parking the thread on some auxiliary list.
     
     // mark == markWord::INFLATING() 即锁正在膨胀中, 当前线程需要进行等待直到膨胀完成.
-    // 等待操作通过调用 read_stable_mark 方法完成, 该方法会通过 spin(自旋)/yield(释放 CPU 使用权))/park(阻塞) 等混合方式让当前线程进行等待知道锁膨胀完成.
+    // 等待操作通过调用 read_stable_mark 方法完成, 该方法会通过 spin(自旋)/yield(释放 CPU 使用权))/park(休眠) 等混合方式让当前线程进行等待知道锁膨胀完成.
     // 注：markWord::INFLATING() 为 _value 为 0 的 markWord.
     if (mark == markWord::INFLATING()) {
       read_stable_mark(object);
