@@ -1927,20 +1927,26 @@ void os::PlatformEvent::park() {       // AKA "down()"
     if (Atomic::cmpxchg(&_event, v, v - 1) == v) break;
   }
   guarantee(v >= 0, "invariant");
-
+  // v 初始值为 0, 如果有多个线程同时调用当前线程的 park() 方法, 该代码块仅会被执行一次.
   if (v == 0) { // Do this the hard way by blocking ...
+    // 获取 mutex.
     int status = pthread_mutex_lock(_mutex);
     assert_status(status == 0, status, "mutex_lock");
     guarantee(_nParked == 0, "invariant");
+    // 已 park 线程计数 +1.
     ++_nParked;
+    // 正常情况下 _event 小于 0, 当前线程需要在条件变量上无限期等待.
     while (_event < 0) {
       // OS-level "spurious wakeups" are ignored
       status = pthread_cond_wait(_cond, _mutex);
       assert_status(status == 0, status, "cond_wait");
     }
+    // ####### 被唤醒后操作 ##########
+    // 已 park 线程计数 -1.
     --_nParked;
-
+    // 重置 _event 为 0.
     _event = 0;
+    // 释放 mutex
     status = pthread_mutex_unlock(_mutex);
     assert_status(status == 0, status, "mutex_unlock");
     // Paranoia to ensure our locked and lock-free paths interact
@@ -2021,13 +2027,14 @@ void os::PlatformEvent::unpark() {
   // properly. This spurious return doesn't manifest itself in any user code
   // but only in the correctly written condition checking loops of ObjectMonitor,
   // Mutex/Monitor, Thread::muxAcquire and JavaThread::sleep
-
+  // 将其原子的置为 1，如果原来就是 1，说明已经 unpark 过了，直接返回.
   if (Atomic::xchg(&_event, 1) >= 0) return;
-
+  // 获取锁.
   int status = pthread_mutex_lock(_mutex);
   assert_status(status == 0, status, "mutex_lock");
   int anyWaiters = _nParked;
   assert(anyWaiters == 0 || anyWaiters == 1, "invariant");
+  // 解锁.
   status = pthread_mutex_unlock(_mutex);
   assert_status(status == 0, status, "mutex_unlock");
 
@@ -2038,7 +2045,7 @@ void os::PlatformEvent::unpark() {
   // will simply re-test the condition and re-park itself.
   // This provides particular benefit if the underlying platform does not
   // provide wait morphing.
-
+  // 唤醒在条件变量上等待的线程.
   if (anyWaiters != 0) {
     status = pthread_cond_signal(_cond);
     assert_status(status == 0, status, "cond_signal");
