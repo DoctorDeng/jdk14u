@@ -466,7 +466,7 @@ void ObjectMonitor::EnterI(TRAPS) {
   }
 
   // The Spin failed -- Enqueue and park the thread ...
-  // 3. 如果通过 CAS 和自适应自旋(spin) 尝试获取锁都失败, 则将线程入队到 _cxq 中, 并 park(休眠) 该线程
+  // 3. 如果通过 CAS 和自适应自旋(spin) 尝试获取锁都失败, 则将线程入队到 _cxq 中, 并 park(阻塞) 该线程
   assert(_succ != Self, "invariant");
   assert(_owner != Self, "invariant");
   assert(_Responsible != Self, "invariant");
@@ -578,7 +578,7 @@ void ObjectMonitor::EnterI(TRAPS) {
         recheckInterval = MAX_RECHECK_INTERVAL;
       }
     } else {
-      // 非负责线程(responsible thread) 使用 park 永久休眠(除非被唤醒).
+      // 非负责线程(responsible thread) 使用 park 永久阻塞(除非被唤醒).
       Self->_ParkEvent->park();
     }
     // 被唤醒后再次尝试获取锁.
@@ -612,7 +612,7 @@ void ObjectMonitor::EnterI(TRAPS) {
     if (_succ == Self) _succ = NULL;
 
     // Invariant: after clearing _succ a thread *must* retry _owner before parking.
-    // 不变量: 在清除 _succ 之后，线程 "必须" 重试 _owner 才能 park(休眠).
+    // 不变量: 在清除 _succ 之后，线程 "必须" 重试 _owner 才能 park(阻塞).
     // 内存屏障, 禁用指令重排序.
     OrderAccess::fence();
   }
@@ -718,7 +718,7 @@ void ObjectMonitor::ReenterI(Thread * Self, ObjectWaiter * SelfNode) {
     // State transition wrappers around park() ...
     // ReenterI() wisely defers state transitions until
     // it's clear we must park the thread.
-    // 2. 获取锁失败, park(休眠)自身.
+    // 2. 获取锁失败, park(阻塞)自身.
     {
       OSThreadContendState osts(Self->osthread());
       ThreadBlockInVM tbivm(jt);
@@ -1335,7 +1335,7 @@ void ObjectMonitor::wait(jlong millis, bool interruptible, TRAPS) {
   // TODO-FIXME: change the following logic to a loop of the form
   //   while (!timeout && !interrupted && _notified == 0) park()
 
-  // 3. 该线程位于 Waitset 列表中 - 现在 park(休眠)它.
+  // 3. 该线程位于 Waitset 列表中 - 现在 park(阻塞)它.
   // 在 MP 系统上，在 park 之前还要进行自旋操作.
   int ret = OS_OK;
   int WasNotified = 0;
@@ -1347,7 +1347,7 @@ void ObjectMonitor::wait(jlong millis, bool interruptible, TRAPS) {
   // * 如果节点在 WaitSet 中(节点状态为 TS_WAIT)则将其从 WaitSet 中移除.
   // * 如果节点状态为 TS_RUN 则重新执行 enter 方法进入 monitor,
   // * 如果节点状态为 TS_ENTER 或 TS_CXQ, 则调用 ReenterI 尝试重新进入 monitor.
-  // 注：ReenterI 相比于 enter 方法不会将当前线程添加到 cxq 或 EntryList 中(因为处于 TS_ENTER 或 TS_CXQ 状态的节点已经处于两队列中), 仅会尝试获取锁, 失败则会 park(休眠) 自身.
+  // 注：ReenterI 相比于 enter 方法不会将当前线程添加到 cxq 或 EntryList 中(因为处于 TS_ENTER 或 TS_CXQ 状态的节点已经处于两队列中), 仅会尝试获取锁, 失败则会 park(阻塞) 自身.
   { // State transition wrappers
     OSThread* osthread = Self->osthread();
     OSThreadWaitState osts(osthread, true);
@@ -1513,7 +1513,7 @@ void ObjectMonitor::wait(jlong millis, bool interruptible, TRAPS) {
 // 考虑：
 // 如果锁很酷 (cxq == null && succ == null)，并且在一个 MP 系统上
 // 然后将线程从 WaitSet 传输到 EntryList
-// 我们可能只是将一个线程从 WaitSet 中取出，并直接对其进行 unpark() (唤醒休眠的线程的方法).
+// 我们可能只是将一个线程从 WaitSet 中取出，并直接对其进行 unpark() (唤醒阻塞的线程的方法).
 
 // 实际的 Object.notify() 实现方法.
 // * 如果 EntryList 为空, 将 WaitSet 头部节点移动到 _EntryList 中, 该节点为第一个节点.
