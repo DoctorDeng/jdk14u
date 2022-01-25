@@ -562,6 +562,7 @@ void ObjectMonitor::EnterI(TRAPS) {
   int nWakeups = 0;
   int recheckInterval = 1;
 
+  // park 当前线程.
   for (;;) {
 
     if (TryLock(Self) > 0) break;
@@ -580,7 +581,7 @@ void ObjectMonitor::EnterI(TRAPS) {
       // 非负责线程(responsible thread) 使用 park 永久休眠(除非被唤醒).
       Self->_ParkEvent->park();
     }
-    // 再次尝试获取锁.
+    // 被唤醒后再次尝试获取锁.
     if (TryLock(Self) > 0) break;
 
     // The lock is still contested.
