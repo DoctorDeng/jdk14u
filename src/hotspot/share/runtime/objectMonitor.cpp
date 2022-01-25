@@ -694,7 +694,7 @@ void ObjectMonitor::EnterI(TRAPS) {
 // monitor reentry in wait().
 //
 // In the future we should reconcile EnterI() and ReenterI().
-
+// ReenterI() 是 EnterI() 中争用慢路径后半部分的专用内联形式. ReenterI() 仅用于从  monitor 重新 wait().
 void ObjectMonitor::ReenterI(Thread * Self, ObjectWaiter * SelfNode) {
   assert(Self != NULL, "invariant");
   assert(SelfNode != NULL, "invariant");
@@ -710,12 +710,14 @@ void ObjectMonitor::ReenterI(Thread * Self, ObjectWaiter * SelfNode) {
     guarantee(v == ObjectWaiter::TS_ENTER || v == ObjectWaiter::TS_CXQ, "invariant");
     assert(_owner != Self, "invariant");
 
+    // 1. 尝试获取锁.
     if (TryLock(Self) > 0) break;
     if (TrySpin(Self) > 0) break;
 
     // State transition wrappers around park() ...
     // ReenterI() wisely defers state transitions until
     // it's clear we must park the thread.
+    // 2. 获取锁失败, park(休眠)自身.
     {
       OSThreadContendState osts(Self->osthread());
       ThreadBlockInVM tbivm(jt);
@@ -737,6 +739,7 @@ void ObjectMonitor::ReenterI(Thread * Self, ObjectWaiter * SelfNode) {
     // Try again, but just so we distinguish between futile wakeups and
     // successful wakeups.  The following test isn't algorithmically
     // necessary, but it helps us maintain sensible statistics.
+    // 3. 被唤醒时再次尝试获取锁.
     if (TryLock(Self) > 0) break;
 
     // The lock is still contested.
@@ -744,6 +747,7 @@ void ObjectMonitor::ReenterI(Thread * Self, ObjectWaiter * SelfNode) {
     // Note that the counter is not protected by a lock or updated by atomics.
     // That is by design - we trade "lossy" counters which are exposed to
     // races during updates for a lower probe effect.
+    // 更新无效唤醒计数.
     ++nWakeups;
 
     // Assuming this is not a spurious wakeup we'll normally
@@ -766,7 +770,7 @@ void ObjectMonitor::ReenterI(Thread * Self, ObjectWaiter * SelfNode) {
   // EntryList is stable and cxq is prepend-only.
   // The head of cxq is volatile but the interior is stable.
   // In addition, Self.TState is stable.
-
+  // 3. 获取锁成功, 解除当前线程与 cxq 或 EntryList 的链接.
   assert(_owner == Self, "invariant");
   assert(((oop)(object()))->mark() == markWord::encode(this), "invariant");
   UnlinkAfterAcquire(Self, SelfNode);
@@ -1252,6 +1256,7 @@ static void post_monitor_wait_event(EventJavaMonitorWait* event,
 //
 // Note: a subset of changes to ObjectMonitor::wait()
 // will need to be replicated in complete_exit
+
 // 条件变量(condition) 实现, 即 Object.wait().
 void ObjectMonitor::wait(jlong millis, bool interruptible, TRAPS) {
   Thread * const Self = THREAD;
@@ -1313,7 +1318,7 @@ void ObjectMonitor::wait(jlong millis, bool interruptible, TRAPS) {
   // 释放自旋锁.
   Thread::SpinRelease(&_WaitSetLock);
 
-  // 2. 重置重入次数、增加 _waiters 计数 并调用 exit 方法退出 monitor.
+  // 2. 重置重入次数、更新 _waiters 计数 并调用 exit 方法退出 monitor.
   _Responsible = NULL;
 
   intx save = _recursions;     // record the old recursion count
@@ -1330,13 +1335,18 @@ void ObjectMonitor::wait(jlong millis, bool interruptible, TRAPS) {
   //   while (!timeout && !interrupted && _notified == 0) park()
 
   // 3. 该线程位于 Waitset 列表中 - 现在 park(休眠)它.
-  // 在 MP 系统上，在 park 之前还有进行自旋操作.
+  // 在 MP 系统上，在 park 之前还要进行自旋操作.
   int ret = OS_OK;
   int WasNotified = 0;
 
   // Need to check interrupt state whilst still _thread_in_vm
   bool interrupted = interruptible && jt->is_interrupted(false);
 
+  // 4. 状态转换:
+  // * 如果节点在 WaitSet 中(节点状态为 TS_WAIT)则将其从 WaitSet 中移除.
+  // * 如果节点状态为 TS_RUN 则重新执行 enter 方法进入 monitor,
+  // * 如果节点状态为 TS_ENTER 或 TS_CXQ, 则调用 ReenterI 尝试重新进入 monitor.
+  // 注：ReenterI 相比于 enter 方法不会将当前线程添加到 cxq 或 EntryList 中(因为处于 TS_ENTER 或 TS_CXQ 状态的节点已经处于两队列中), 仅会尝试获取锁, 失败则会 park(休眠) 自身.
   { // State transition wrappers
     OSThread* osthread = Self->osthread();
     OSThreadWaitState osts(osthread, true);
@@ -1363,6 +1373,13 @@ void ObjectMonitor::wait(jlong millis, bool interruptible, TRAPS) {
 
     } // Exit thread safepoint: transition _thread_blocked -> _thread_in_vm
 
+    // 节点可能位于 WaitSet、EntryList（或 cxq) 或处于从 WaitSet 到 EntryList 的转换中.
+    // 看看是否需要从 WaitSet 中删除节点.
+    // 如果线程不在等待队列(WaitSet)中, 使用双重检查锁定(double-checked locking)来避免抓取 _WaitSetLock
+
+    // 请注意，在取回 TState 之前，不需要 fence(又称为内存屏障, 能够防止指令重排序的指令).
+    // 在最坏的情况下，将获取由 is 线程写入的过时的 TS_WAIT 值(也许甚至可以通过查看处理器自己的 store buffer 来满足，尽管鉴于先前的 ST 和此负载之间的代码路径的长度极不可能). 
+    // 如果以下 LD 获取过时的 TS_WAIT 值，那么将获取锁，然后重新获取最新的 TS_WAIT 值. 也就是说，我们安全的失败了.
     // Node may be on the WaitSet, the EntryList (or cxq), or in transition
     // from the WaitSet to the EntryList.
     // See if we need to remove Node from the WaitSet.
@@ -1378,9 +1395,11 @@ void ObjectMonitor::wait(jlong millis, bool interruptible, TRAPS) {
     // then we'll acquire the lock and then re-fetch a fresh TState value.
     // That is, we fail toward safety.
 
+    // TState 为 TS_WAIT 表示节点在 WaitSet 中, 由于节点目前刚从 WaitSet 中被唤醒, 因此需要从 WaitSet 中移除当前节点.
     if (node.TState == ObjectWaiter::TS_WAIT) {
       Thread::SpinAcquire(&_WaitSetLock, "WaitSet - unlink");
       if (node.TState == ObjectWaiter::TS_WAIT) {
+        // 将当前节点从 WaitSet 重移除.
         DequeueSpecificWaiter(&node);       // unlink from WaitSet
         assert(node._notified == 0, "invariant");
         node.TState = ObjectWaiter::TS_RUN;
@@ -1392,8 +1411,12 @@ void ObjectMonitor::wait(jlong millis, bool interruptible, TRAPS) {
     // on the EntryList (TS_ENTER), or on the cxq (TS_CXQ).
     // The Node's TState variable is stable from the perspective of this thread.
     // No other threads will asynchronously modify TState.
+    // 线程现在不在列表上 (TS_RUN), 在 EntryList (TS_ENTER)或 cxq (TS_cxq) 上.
+    // 从这个线程的角度来看，节点的 TState 变量是稳定的.
+    // 没有其他线程会异步修改 TState.
     guarantee(node.TState != ObjectWaiter::TS_WAIT, "invariant");
     OrderAccess::loadload();
+    // 重置 _succ(假定继承人), 如果 _succ 为自身.
     if (_succ == Self) _succ = NULL;
     WasNotified = node._notified;
 
@@ -1439,6 +1462,7 @@ void ObjectMonitor::wait(jlong millis, bool interruptible, TRAPS) {
 
     assert(_owner != Self, "invariant");
     ObjectWaiter::TStates v = node.TState;
+    // 如果状态为 TS_RUN 则重新执行 enter 方法进入 monitor, 否则调用 ReenterI 方法进入 monitor.
     if (v == ObjectWaiter::TS_RUN) {
       enter(Self);
     } else {
@@ -1457,7 +1481,7 @@ void ObjectMonitor::wait(jlong millis, bool interruptible, TRAPS) {
   } // OSThreadWaitState()
 
   jt->set_current_waiting_monitor(NULL);
-
+  // 获取锁成功后还原记录的重入次数, 更新 _waiters 计数.
   guarantee(_recursions == 0, "invariant");
   _recursions = save;     // restore the old recursion count
   _waiters--;             // decrement the number of waiters
@@ -1485,10 +1509,19 @@ void ObjectMonitor::wait(jlong millis, bool interruptible, TRAPS) {
 // If the lock is cool (cxq == null && succ == null) and we're on an MP system
 // then instead of transferring a thread from the WaitSet to the EntryList
 // we might just dequeue a thread from the WaitSet and directly unpark() it.
+// 考虑：
+// 如果锁很酷 (cxq == null && succ == null)，并且在一个 MP 系统上
+// 然后将线程从 WaitSet 传输到 EntryList
+// 我们可能只是将一个线程从 WaitSet 中取出，并直接对其进行 unpark() (唤醒休眠的线程的方法).
 
+// 实际的 Object.notify() 实现方法.
+// * 如果 EntryList 为空, 将 WaitSet 头部节点移动到 _EntryList 中, 该节点为第一个节点.
+// * 如果 EntryList 非空, 将 WaitSet 头部节点通过 CAS 移动到 _cxq 中, 该节点为头部(head)节点.
 void ObjectMonitor::INotify(Thread * Self) {
   Thread::SpinAcquire(&_WaitSetLock, "WaitSet - notify");
+  // 获取 WaitSet 队列头部节点.
   ObjectWaiter * iterator = DequeueWaiter();
+  // 如果 WaitSet 不为空在进行 notify() 操作.
   if (iterator != NULL) {
     guarantee(iterator->TState == ObjectWaiter::TS_WAIT, "invariant");
     guarantee(iterator->_notified == 0, "invariant");
@@ -1498,6 +1531,10 @@ void ObjectMonitor::INotify(Thread * Self) {
     // b.  push it onto the front of the _cxq (policy == 2).
     // For now we use (b).
 
+    // 处置 - 我们可以用迭代器做什么?
+    // a. 将节点直接添加到 EntryList - 任意尾部(policy == 1)或头部(policy == 0).
+    // b. 将节点推送到 _cxq (policy == 2)
+    // 现在我们使用 (b)
     iterator->TState = ObjectWaiter::TS_ENTER;
 
     iterator->_notified = 1;
@@ -1511,6 +1548,8 @@ void ObjectMonitor::INotify(Thread * Self) {
     }
 
     // prepend to cxq
+    // * 如果 EntryList 为空, 直接将节点添加到 _EntryList 中, 该节点为第一个节点.
+    // * 如果 EntryList 非空, 通过 CAS 将节点添加到 _cxq 中, 该节点为头部(head)节点.
     if (list == NULL) {
       iterator->_next = iterator->_prev = NULL;
       _EntryList = iterator;
@@ -1533,6 +1572,10 @@ void ObjectMonitor::INotify(Thread * Self) {
     // on _WaitSetLock so it's not profitable to reduce the length of the
     // critical section.
 
+    // _WaitSetLock 保护等待队列(wait queue), 而不是 EntryList.
+    // 我们可以将上面的 add-to-EntryList 操作移到受 _WaitSetLock 保护的关键部分之外.
+    // 实际上，这是没有用的. 除了 wait() 超时和中断之外，monitor 所有者是唯一获取 _WaitSetLock 的线程.
+    // 几乎没有关于 _WaitSetLoc k的争论，因此减少关键部分的长度无利可图.
     iterator->wait_reenter_begin(this);
   }
   Thread::SpinRelease(&_WaitSetLock);
@@ -1547,9 +1590,10 @@ void ObjectMonitor::INotify(Thread * Self) {
 // When the "minimum wait" is set to a small non-zero timeout value
 // and the program does not hang whereas it did absent "minimum wait",
 // that suggests a lost wakeup bug.
-
+// Object.notify() 实现.
 void ObjectMonitor::notify(TRAPS) {
   CHECK_OWNER();  // Throws IMSE if not owner.
+  // 如果 _WaitSet 为空直接返回.
   if (_WaitSet == NULL) {
     return;
   }
@@ -1565,7 +1609,15 @@ void ObjectMonitor::notify(TRAPS) {
 // that in prepend-mode we invert the order of the waiters. Let's say that the
 // waitset is "ABCD" and the EntryList is "XYZ". After a notifyAll() in prepend
 // mode the waitset will be empty and the EntryList will be "DCBAXYZ".
+// notifyAll() 的当前实现将 waiters 一次一个地从 waitset 传输到 EntryList.
+// 单次批量传输可以更有效地实现这一点，但实际上并不需要时间.
+// 还要注意，在预端模式(prepend-mode)下，我们会颠倒 waiters 的顺序. 假设 waitset 是 "ABCD"，EntryList 是 "XYZ".
+// 在预端模式模式下执行 notifyAll() 后，waitset 将为空，EntryList 将为 "DCBAXYZ".
 
+// Object.notifyAll() 实现, 目前实现逻辑如下:
+// 在循环调用 INotify() 方法, 将 WaitSet 中的线程逐个转移到 _cxq 队列中.
+// 每次转移都会将 WaitSet 队列头部节点, 添加到 _cxq 队列头部.
+// 假设 waitset 是 "ABCD" _cxq 是 "XYZ", 转移后 waitset 为空, 而 _cxq 为 "DCBAXYZ"
 void ObjectMonitor::notifyAll(TRAPS) {
   CHECK_OWNER();  // Throws IMSE if not owner.
   if (_WaitSet == NULL) {
@@ -1574,6 +1626,7 @@ void ObjectMonitor::notifyAll(TRAPS) {
 
   DTRACE_MONITOR_PROBE(notifyAll, this, object(), THREAD);
   int tally = 0;
+  // 在循环中调用 INotify() 逐个将 waitset 中的节点转移到 _cxq 中.
   while (_WaitSet != NULL) {
     tally++;
     INotify(THREAD);
