@@ -1902,16 +1902,16 @@ run:
           // 4. 未开启偏向锁.
           // 上述情况都需要进入到轻量级锁逻辑.
           if (!success) {
-            // 构建 Displaced Mark Word, 其两位为 01（即无锁状态）.
+            // 构建 Displaced Mark Word, 其最后三位为 001（即无锁状态）.
             markWord displaced = lockee->mark().set_unlocked();
-            // Lock Record 中的 lock 指向该 Displaced Mark Word
+            // 将 Displaced Mark Word 记录到 Lock Record  的 _lock 中. 
             entry->lock()->set_displaced_header(displaced);
             // 如果指定了 -XX:+UseHeavyMonitors，则 call_vm=true，代表禁用偏向锁和轻量级锁.
             bool call_vm = UseHeavyMonitors;
-            // 如果 CAS 失败或者禁用轻量级锁
+            // 如果禁用轻量级锁或者 CAS 失败(表示偏向锁被其他线程持有).
             if (call_vm || lockee->cas_set_mark(markWord::from_pointer(entry), displaced) != displaced) {
               // Is it simple recursive case?
-              // 如果未禁用轻量级锁且是锁重入则将 Lock Record 记录的 Displaced Mark Word 设置为 null 起到锁重入计数的作用.
+              // 如果未禁用轻量级锁且是锁重入则将 Lock Record 记录的 Displaced Mark Word 设置为 0 起到锁重入计数的作用.
               if (!call_vm && THREAD->is_lock_owned((address) displaced.clear_lock_bits().to_pointer())) {
                 entry->lock()->set_displaced_header(markWord::from_pointer(NULL));
               } else {
@@ -1948,6 +1948,7 @@ run:
                 markWord old_header = markWord::encode(lock);
                 if (call_vm || lockee->cas_set_mark(header, old_header) != old_header) {
                   // restore object for the slow case
+                  // CAS 失败则表示轻量级锁存在争用, 此时需要将其升级为重量级锁, 并调用其 exit() 方法释放重量级锁.
                   most_recent->set_obj(lockee);
                   CALL_VM(InterpreterRuntime::monitorexit(THREAD, most_recent), handle_exception);
                 }

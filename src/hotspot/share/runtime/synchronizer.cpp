@@ -309,6 +309,7 @@ void ObjectSynchronizer::enter(Handle obj, BasicLock* lock, TRAPS) {
   inflate(THREAD, obj(), inflate_cause_monitor_enter)->enter(THREAD);
 }
 
+// 退出 Monitor.
 void ObjectSynchronizer::exit(oop object, BasicLock* lock, TRAPS) {
   markWord mark = object->mark();
   // We cannot check for Biased Locking if we are racing an inflation.
@@ -1359,7 +1360,7 @@ ObjectMonitor* ObjectSynchronizer::inflate(Thread* self,
     // We could always eliminate polling by parking the thread on some auxiliary list.
     
     // mark == markWord::INFLATING() 即锁正在膨胀中, 当前线程需要进行等待直到膨胀完成.
-    // 等待操作通过调用 read_stable_mark 方法完成, 该方法会通过 spin(自旋)/yield(释放 CPU 使用权))/park(休眠) 等混合方式让当前线程进行等待知道锁膨胀完成.
+    // 等待操作通过调用 read_stable_mark 方法完成, 该方法会通过 spin(自旋)/yield(释放 CPU 使用权))/park(休眠) 等混合方式让当前线程进行等待直到锁膨胀完成.
     // 注：markWord::INFLATING() 为 _value 为 0 的 markWord.
     if (mark == markWord::INFLATING()) {
       read_stable_mark(object);
@@ -1380,10 +1381,10 @@ ObjectMonitor* ObjectSynchronizer::inflate(Thread* self,
     // the odds of inflation contention.
 
 
-    // 我们现在使用每线程私有ObjectMonitor免费列表。 这些列表从临界膨胀范围内的全局免费列表中重新传输。 线程可以将多个Objecmonitors en-Mass传输到全局免费列表到其本地免费列表。 这减少了一致性流量和锁定全局免费列表的争用。
+    // 我们现在使用每线程私有 ObjectMonitor 免费列表。 这些列表从临界膨胀范围内的全局免费列表中重新传输。 线程可以将多个Objecmonitors en-Mass传输到全局免费列表到其本地免费列表。 这减少了一致性流量和锁定全局免费列表的争用。
     // 使用此类本地免费列表，如果出现om_alloc（）调用并不重要
     // 在 CAS(INFLATING) 操作之前或之后。
-    // 查看om_alloc（）中的注释
+    // 查看 om_alloc() 中的注释
     // We now use per-thread private objectmonitor free lists.
     // These list are reprovisioned from the global free list outside the
     // critical INFLATING...ST interval.  A thread can transfer
