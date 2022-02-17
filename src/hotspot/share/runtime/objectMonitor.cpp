@@ -278,7 +278,7 @@ void ObjectMonitor::enter(TRAPS) {
   // transitions.  The following spin is strictly optional ...
   // Note that if we acquire the monitor from an initial spin
   // we forgo posting JVMTI events and firing DTRACE probes.
-  // 2. 尝试通过自旋繁琐获取锁.
+  // 2. 尝试通过自旋反复获取锁.
   if (TrySpin(Self) > 0) {
     assert(_owner == Self, "must be Self: owner=" INTPTR_FORMAT, p2i(_owner));
     assert(_recursions == 0, "must be 0: recursions=" INTX_FORMAT, _recursions);
@@ -335,7 +335,7 @@ void ObjectMonitor::enter(TRAPS) {
       jt->set_suspend_equivalent();
       // cleared by handle_special_suspend_equivalent_condition()
       // or java_suspend_self()
-
+      // 真正进入 ObjectMonitor 实现.
       EnterI(THREAD);
 
       if (!ExitSuspendEquivalent(jt)) break;
@@ -1045,7 +1045,7 @@ void ObjectMonitor::exit(bool not_suspended, TRAPS) {
     // The following loop is tantamount to: w = swap(&cxq, NULL)
     // 5. 将 _cxq 中的所有线程批量转移到 EntryList.
 
-    // 5.1 清空 _cxq.
+    // 5.1 将 _cxq 指向 NULL.
     for (;;) {
       assert(w != NULL, "Invariant");
       ObjectWaiter * u = Atomic::cmpxchg(&_cxq, w, (ObjectWaiter*)NULL);
@@ -1064,7 +1064,8 @@ void ObjectMonitor::exit(bool not_suspended, TRAPS) {
     // Invariant: s chases t chases u.
     // TODO-FIXME: consider changing EntryList from a DLL to a CDLL so
     // we have faster access to the tail.
-    // 5.2 将 _cxq 中的节点放入 _EntryList 尾部.
+    // 5.2 将 _cxq 中的节点放入 _EntryList.
+    //     在实现上直接将 _EntryList 指向 _cxq 队列中的头节点，并将每个节点的 _prev 指针指向其上一个节点.
     _EntryList = w;
     ObjectWaiter * q = NULL;
     ObjectWaiter * p;
