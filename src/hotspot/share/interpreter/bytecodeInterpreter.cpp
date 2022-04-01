@@ -2186,33 +2186,43 @@ run:
 
           UPDATE_PC_AND_TOS_AND_CONTINUE(3, count);
         }
-
+      // 初始化 Java 对象解释执行过程.
       CASE(_new): {
         u2 index = Bytes::get_Java_u2(pc+1);
         ConstantPool* constants = istate->method()->constants();
+        // 确认常量池中是否存在 new 指令参数对应的 Klass(Class 类).
         if (!constants->tag_at(index).is_unresolved_klass()) {
           // Make sure klass is initialized and doesn't have a finalizer
+          // 确保 klass 已初始化且没有 finalizer.
           Klass* entry = constants->resolved_klass_at(index);
           InstanceKlass* ik = InstanceKlass::cast(entry);
+          // 当 Klass 已初始化且能够通过快速路径分配内存时.
           if (ik->is_initialized() && ik->can_be_fastpath_allocated() ) {
             size_t obj_size = ik->size_helper();
             oop result = NULL;
             // If the TLAB isn't pre-zeroed then we'll have to do it
+            // 记录是否需要将对象所有字段置零值.
             bool need_zero = !ZeroTLAB;
+            // TLAB 情况下分配内存.
             if (UseTLAB) {
               result = (oop) THREAD->tlab().allocate(obj_size);
             }
             // Disable non-TLAB-based fast-path, because profiling requires that all
             // allocations go through InterpreterRuntime::_new() if THREAD->tlab().allocate
             // returns NULL.
+            // 非 TLAB 方式.
+            // 禁用基于非 TLAB 的快速路径，因为分析需要所有分配都经过 InterpreterRuntime::_new() 如果 THREAD->tlab().allocate 返回 null.
 #ifndef CC_INTERP_PROFILE
             if (result == NULL) {
               need_zero = true;
               // Try allocate in shared eden
             retry:
+              // 直接在 eden 中分配对象.
               HeapWord* compare_to = *Universe::heap()->top_addr();
               HeapWord* new_top = compare_to + obj_size;
               if (new_top <= *Universe::heap()->end_addr()) {
+                // cmpxchg 是 x86 中的 CAS 指令.
+                // 通过 CAS 方式分配空间，并发失败的话，转 retry 中重试直至成功分配为止.
                 if (Atomic::cmpxchg(Universe::heap()->top_addr(), compare_to, new_top) != compare_to) {
                   goto retry;
                 }
@@ -2222,6 +2232,7 @@ run:
 #endif
             if (result != NULL) {
               // Initialize object (if nonzero size and need) and then the header
+              // 如果需要初始化零值.
               if (need_zero ) {
                 HeapWord* to_zero = (HeapWord*) result + sizeof(oopDesc) / oopSize;
                 obj_size -= sizeof(oopDesc) / oopSize;
@@ -2229,16 +2240,19 @@ run:
                   memset(to_zero, 0, obj_size * HeapWordSize);
                 }
               }
+              // 根据是否启用偏向锁，设置对象头信息.
               if (UseBiasedLocking) {
                 result->set_mark(ik->prototype_header());
               } else {
                 result->set_mark(markWord::prototype());
               }
+              // 设置分代年龄.
               result->set_klass_gap(0);
               result->set_klass(ik);
               // Must prevent reordering of stores for object initialization
               // with stores that publish the new object.
               OrderAccess::storestore();
+              // 将对象引用入栈，继续执行下一条指令.
               SET_STACK_OBJECT(result, 0);
               UPDATE_PC_AND_TOS_AND_CONTINUE(3, 1);
             }
