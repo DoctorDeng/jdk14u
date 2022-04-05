@@ -39,7 +39,7 @@ class objArrayOopDesc : public arrayOopDesc {
   friend class psPromotionManager;
   friend class CSetMarkWordClosure;
   friend class G1ParScanPartialArrayClosure;
-
+  // 返回指定下标下的 oop 地址.
   template <class T> T* obj_at_addr(int index) const;
   template <class T> T* obj_at_addr_raw(int index) const;
 
@@ -85,13 +85,15 @@ private:
   HeapWord* base_raw() const;
 
   // Accessing
+  // 返回指定数组下标下的 oop.
   oop obj_at(int index) const;
-
+  // 设置指定数组下标下的 oop.
   void obj_at_put(int index, oop value);
 
   oop atomic_compare_exchange_oop(int index, oop exchange_value, oop compare_value);
 
   // Sizing
+  // 返回对象头大小和对象大小.
   static int header_size()    { return arrayOopDesc::header_size(T_OBJECT); }
   int object_size()           { return object_size(length()); }
 
@@ -103,7 +105,7 @@ private:
     assert((int)osz > 0, "no overflow");
     return (int)osz;
   }
-
+  // 返回存储的 oop 对象对应的 Klass(Class 类型)
   Klass* element_klass();
 
 public:

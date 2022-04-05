@@ -32,16 +32,16 @@
 // OBJECT hierarchy
 // This hierarchy is a representation hierarchy, i.e. if A is a superclass
 // of B, A's representation is a prefix of B's representation.
-
+// java 对象中 oop 的偏移量而不是地址.
 typedef juint narrowOop; // Offset instead of address for an oop within a java object
-
+// 如果是压缩的 klass 指针，则使用 narrowKlass.
 // If compressed klass pointers then use narrowKlass.
 typedef juint  narrowKlass;
 
 typedef void* OopOrNarrowOopStar;
 
 #ifndef CHECK_UNHANDLED_OOPS
-
+// 对象层次结构.
 typedef class oopDesc*                    oop;
 typedef class   instanceOopDesc*            instanceOop;
 typedef class   arrayOopDesc*               arrayOop;
@@ -191,7 +191,7 @@ template <class T> inline T cast_from_oop(oop o) {
 }
 
 // The metadata hierarchy is separate from the oop hierarchy
-
+// 元数据层次结构与 oop 层次结构是分开.
 //      class MetaspaceObj
 class   ConstMethod;
 class   ConstantPoolCache;
@@ -204,7 +204,7 @@ class   CompiledICHolder;
 
 
 // The klass hierarchy is separate from the oop hierarchy.
-
+// klass 层次结构与 oop 层次结构是分开的.
 class Klass;
 class   InstanceKlass;
 class     InstanceMirrorKlass;

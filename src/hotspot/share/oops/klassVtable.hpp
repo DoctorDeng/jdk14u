@@ -37,12 +37,18 @@
 
 // Currently a klassVtable contains a direct reference to the vtable data, and is therefore
 // not preserved across GCs.
-
+// 一个 klassVtable 抽象了嵌入在 InstanceKlass 和 ArrayKlass 中的可变长度 vtable.
+// klassVtable 对象被用作 vtable 的便捷临时访问器，不实际保存 vtable 数据。
+// 注意：在类被验证之前不应该访问 klassVtable (在那之前，vtable 是未初始化的).
+//目前一个 klassVtable 包含对 vtable 数据的直接引用，因此不跨 GC 保留.
 class vtableEntry;
 
 class klassVtable {
+  // vtable 对应的 klass 类型.
   Klass*       _klass;            // my klass
+  // klass中 vtable 数据的起始偏移量.
   int          _tableOffset;      // offset of start of vtable data within klass
+  // vtable 长度.
   int          _length;           // length of vtable (number of entries)
 #ifndef PRODUCT
   int          _verify_count;     // to make verify faster
@@ -161,14 +167,7 @@ class klassVtable {
 };
 
 
-// private helper class for klassVtable
-// description of entry points:
-//    destination is interpreted:
-//      from_compiled_code_entry_point -> c2iadapter
-//      from_interpreter_entry_point   -> interpreter entry point
-//    destination is compiled:
-//      from_compiled_code_entry_point -> nmethod entry point
-//      from_interpreter_entry_point   -> i2cadapter
+ 
 class vtableEntry {
   friend class VMStructs;
   friend class JVMCIVMStructs;
@@ -192,7 +191,7 @@ class vtableEntry {
   friend class klassVtable;
 };
 
-
+// 获取 vtable 中指定索引的方法.
 inline Method* klassVtable::method_at(int i) const {
   assert(i >= 0 && i < _length, "index out of bounds");
   assert(table()[i].method() != NULL, "should not be null");

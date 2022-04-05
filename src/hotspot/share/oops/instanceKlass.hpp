@@ -47,6 +47,7 @@ class RecordComponent;
 // It contains all information needed for at class at execution runtime.
 
 //  InstanceKlass embedded field layout (after declared fields):
+// InstanceKlass 嵌入式字段布局（声明字段后）
 //    [EMBEDDED Java vtable             ] size in words = vtable_len
 //    [EMBEDDED nonstatic oop-map blocks] size in words = nonstatic_oop_map_size
 //      The embedded nonstatic oop-map blocks are short pairs (offset, length)
@@ -133,13 +134,15 @@ class InstanceKlass: public Klass {
 
   // See "The Java Virtual Machine Specification" section 2.16.2-5 for a detailed description
   // of the class loading & initialization procedure, and the use of the states.
+  // 有关详细说明，请参阅“Java虚拟机规范” 第 2.16.2-5 节类加载和初始化过程，以及状态的使用.
+  // 类的状态.
   enum ClassState {
-    allocated,                          // allocated (but not yet linked)
-    loaded,                             // loaded and inserted in class hierarchy (but not linked yet)
-    linked,                             // successfully linked/verified (but not initialized yet)
-    being_initialized,                  // currently running class initializer
-    fully_initialized,                  // initialized (successfull final state)
-    initialization_error                // error happened during initialization
+    allocated,                          // allocated (but not yet linked) 已分配，但未链接.
+    loaded,                             // loaded and inserted in class hierarchy (but not linked yet) 加载并插入到类层次结构中, 但未链接完成.
+    linked,                             // successfully linked/verified (but not initialized yet)  已成功链接/验证, 但未初始化完成.
+    being_initialized,                  // currently running class initializer 正在进行类初始化.
+    fully_initialized,                  // initialized (successfull final state) 已初始化（成功的最终状态）.
+    initialization_error                // error happened during initialization 初始化失败.
   };
 
  private:
@@ -150,12 +153,16 @@ class InstanceKlass: public Klass {
   // must add this field to InstanceKlass::metaspace_pointers_do().
 
   // Annotations for this class
+  // 类注解信息.
   Annotations*    _annotations;
   // Package this class is defined in
+  // 类 package 信息.
   PackageEntry*   _package_entry;
   // Array classes holding elements of this class.
+  // 包含此类元素的数组类.
   Klass* volatile _array_klasses;
   // Constant pool for this class.
+  // 类的常量池.
   ConstantPool* _constants;
   // The InnerClasses attribute and EnclosingMethod attribute. The
   // _inner_classes is an array of shorts. If the class has InnerClasses
@@ -168,6 +175,7 @@ class InstanceKlass: public Klass {
   // number_of_inner_classes * 4. If the class has both InnerClasses
   // and EnclosingMethod attributes the _inner_classes array length is
   // number_of_inner_classes * 4 + enclosing_method_attribute_size.
+  // 内部类信息集合.
   Array<jushort>* _inner_classes;
 
   // The NestMembers attribute. An array of shorts, where each is a
@@ -196,7 +204,10 @@ class InstanceKlass: public Klass {
 
   // Number of heapOopSize words used by non-static fields in this klass
   // (including inherited fields but after header_size()).
+  // 本类中非静态字段使用的 heapOopSize words 数量.
+  //（包括继承的字段，但在 header_size()) 之后.
   int             _nonstatic_field_size;
+  // 本类中静态字段（oop 和非 oop）的数量.
   int             _static_field_size;    // number words used by static fields (oop and non-oop) in this klass
   // Constant pool index to the utf8 entry of the Generic signature,
   // or 0 if none.
@@ -249,6 +260,7 @@ class InstanceKlass: public Klass {
     return _misc_is_shared_boot_class|_misc_is_shared_platform_class|_misc_is_shared_app_class;
   }
   u2              _misc_flags;
+  // 类版本信息.
   u2              _minor_version;        // minor version number of class file
   u2              _major_version;        // major version number of class file
   Thread*         _init_thread;          // Pointer to current thread doing initialization (to handle recursive initialization)
@@ -281,19 +293,23 @@ class InstanceKlass: public Klass {
 #endif
 
   NOT_PRODUCT(int _verify_count;)  // to avoid redundant verifies
-
+  // 类方法信息.
   // Method array.
   Array<Method*>* _methods;
   // Default Method Array, concrete methods inherited from interfaces
+  // 从接口继承的 default 方法信息.
   Array<Method*>* _default_methods;
   // Interfaces (InstanceKlass*s) this class declares locally to implement.
+  // 类声明实现的接口信息.
   Array<InstanceKlass*>* _local_interfaces;
   // Interfaces (InstanceKlass*s) this class implements transitively.
+  // 类传递实现的接口信息(即超类实现的接口信息).
   Array<InstanceKlass*>* _transitive_interfaces;
   // Int array containing the original order of method in the class file (for JVMTI).
   Array<int>*     _method_ordering;
   // Int array containing the vtable_indices for default_methods
   // offset matches _default_methods offset
+  //  默认 vtable 索引.
   Array<int>*     _default_vtable_indices;
 
   // Instance and static variable information, starts with 6-tuples of shorts
@@ -309,6 +325,9 @@ class InstanceKlass: public Klass {
   //     [generic signature index]
   //     [generic signature index]
   //     ...
+  // 实例和静态变量信息，以 shorts 的 6元组开头
+  // [access, name index, sig index, initval index, low_offset, high_offset]
+  // 对于所有字段，后面是通用签名数据数组. 只有具有通用签名属性的字段才有通用数组中的签名数据集.
   Array<u2>*      _fields;
 
   // embedded Java vtable follows here
@@ -631,10 +650,13 @@ public:
 
   // lookup a method in all the interfaces that this class implements
   // (returns NULL if not found)
+  // 在该类实现的所有接口中查找方法
+  //（如果没有找到返回 NULL）
   Method* lookup_method_in_all_interfaces(Symbol* name, Symbol* signature, DefaultsLookupMode defaults_mode) const;
 
   // lookup a method in local defaults then in all interfaces
   // (returns NULL if not found)
+  // 在所有接口中查询默认方法（如果没有找到返回NULL）
   Method* lookup_method_in_ordered_interfaces(Symbol* name, Symbol* signature) const;
 
   // Find method indices by name.  If a method with the specified name is

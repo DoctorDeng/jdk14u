@@ -124,6 +124,8 @@ class Klass : public Metadata {
   //
   // Where to look to observe a supertype (it is &_secondary_super_cache for
   // secondary supers, else is &_primary_supers[depth()].
+  // _super_check_offset, _secondary_super_cache, _secondary_supers
+  // and _primary_supers  所有这些都有助于快速进行子类型检查.
   juint       _super_check_offset;
 
   // Class name.  Instance classes: java/lang/String, etc.  Array classes: [I,
@@ -131,28 +133,39 @@ class Klass : public Metadata {
   Symbol*     _name;
 
   // Cache of last observed secondary supertype
+  // 最后观察到的次要超类型的缓存.
   Klass*      _secondary_super_cache;
   // Array of all secondary supertypes
+  // 所有次要超类型的数组.
   Array<Klass*>* _secondary_supers;
   // Ordered list of all primary supertypes
+  // 所有主要超类型的有序列表.
   Klass*      _primary_supers[_primary_super_limit];
   // java/lang/Class instance mirroring this class
+  // 当前类所属的 java/lang/Class 对象对应的 oop.
   OopHandle _java_mirror;
   // Superclass
+  // 超类.
   Klass*      _super;
   // First subclass (NULL if none); _subklass->next_sibling() is next one
+  // 第一个子类（如果没有，则为 NULL）； _subklass->next_sibling() 是下一个.
   Klass* volatile _subklass;
   // Sibling link (or NULL); links all subklasses of a klass
+  // 同级链接（或 NULL）；链接一个类的所有子类.
   Klass* volatile _next_sibling;
 
   // All klasses loaded by a class loader are chained through these links
+  // 类加载器加载的所有Klass都通过这些链接链接.
   Klass*      _next_link;
 
   // The VM's representation of the ClassLoader used to load this class.
   // Provide access the corresponding instance java.lang.ClassLoader.
+  // 用于加载此类的类加载器的 VM 表示。
+  // 提供访问对应的 java.lang.ClassLoader 实例.
   ClassLoaderData* _class_loader_data;
-
+  // 提供访问当前类的限定符途径，供 Class.getModifiers 使用.
   jint        _modifier_flags;  // Processed access flags, for use by Class.getModifiers.
+  // 访问限定符(例如:publich,private). 类/接口的区别存储在这里.
   AccessFlags _access_flags;    // Access flags. The class/interface distinction is stored here.
 
   JFR_ONLY(DEFINE_TRACE_ID_FIELD;)
@@ -167,6 +180,7 @@ class Klass : public Metadata {
   jint     _biased_lock_revocation_count;
 
   // vtable length
+  // 虚函数表长度.
   int _vtable_len;
 
 private:
@@ -434,6 +448,7 @@ protected:
   // What is the maximum number of primary superclasses any klass can have?
   static juint primary_super_limit()         { return _primary_super_limit; }
 
+  // 虚函数表(vtable).
   // vtables
   klassVtable vtable() const;
   int vtable_length() const { return _vtable_len; }
@@ -511,6 +526,7 @@ protected:
 
   vtableEntry* start_of_vtable() const;
  public:
+  // 返回 vtable 中指定下标下 Method(方法).
   Method* method_at_vtable(int index);
 
   static ByteSize vtable_start_offset();
