@@ -494,7 +494,10 @@ void ObjectMonitor::EnterI(TRAPS) {
   // 注意：自旋会降低线程在 EntryList|cxq 上入队和出队的速率.
   ObjectWaiter * nxt;
   for (;;) {
+    // _cxq 队列为单向链表, 从链表头部入队.
+    // 将节点指向原有的头节点.
     node._next = nxt = _cxq;
+    // CAS 更新头节点为当前入队的节点.
     if (Atomic::cmpxchg(&_cxq, nxt, &node) == nxt) break;
     // 如果入队失败, 则表示 _cxq 队列发生了变化, 在重试前尝试通过 CAS 获取锁.
     // Interference - the CAS failed because _cxq changed.  Just retry.
@@ -529,18 +532,21 @@ void ObjectMonitor::EnterI(TRAPS) {
   // successors where there was risk of stranding.  This would help eliminate the
   // timer scalability issues we see on some platforms as we'd only have one thread
   // -- the checker -- parked on a timer.
-  // 3. 检查 cxq|EntryList 边缘为非空. 如果非空则表示存在竞争.
+  // 3. 当线程进入 cxq 队列后, 检查原有的 cxq 或 EntryList 是否都为空.
+  // * 都为空则表示当前线程为等待获取锁的第一个线程, 此时该线程会被指定为 "负责线程"(responsible thread).
+  // * 如果非空则表示存在竞争. 
   // 当一直有竞争时，退出线程将使用 ST:MEMBAR:LD 1-1 退出协议.
-  // 当竞争减弱时退出操作恢复到更快的 1-0 模式. 此操作可能会交错(竞争)并发的 1-0 退出操作，导致搁浅，因此
-  // 安排一个争用线程使用 timed park() 操作检测并从竞争中恢复.(搁浅是进步失败的一种形式 monitor 已解锁，但所有争用线程仍处于 parked 状态.)
+  // 当竞争减弱时退出操作恢复到更快的 1-0 模式. 此操作可能会交错(竞争)并发的 1-0 退出操作，导致搁浅(stranding)，因此
+  // 安排一个争用线程使用 timed park() 操作检测并从竞争中恢复.(搁浅是进程 failure 的一种形式 monitor 已解锁，但所有争用线程仍处于 parked 状态.)
 
   // 至少有一个争用线程将定期轮询 _owner. 其中一个争用线程将成为指定的 "负责线程"(responsible thread)。
   // 负责线程使用 timed park() ，而不是正常的无限 park 操作--它定期唤醒、检查 1-0 exit 操作允许的潜在搁浅(stranding)并从中恢复
-  // 在任意时刻，每个 monitor 最多需要一个负责线程。只有 cxq|EntryList 上的线程才能负责 monitor.
+  // 在任意时刻，每个 monitor 最多需要一个负责线程。只有 cxq | EntryList 上的线程才能负责 monitor.
   // 目前，其中一个争用线程承担了 "Responsible(负责)" 的新增角色.
   if (nxt == NULL && _EntryList == NULL) {
     // Try to assume the role of responsible thread for the monitor.
     // CONSIDER:  ST vs CAS vs { if (Responsible==null) Responsible=Self }
+    // 如果当前线程符合 负责线程 条件，则更新负责线程为当前线程.
     Atomic::replace_if_null(&_Responsible, Self);
   }
 
@@ -857,6 +863,9 @@ void ObjectMonitor::UnlinkAfterAcquire(Thread *Self, ObjectWaiter *SelfNode) {
 // thread calling ::exit() never transitions to a stable state.
 // This inhibits GC, which in turn inhibits asynchronous (and
 // inopportune) reclamation of "this".
+// 请注意，垃圾收集器无法恢复 objectMonitor 或从调用 ::exit() 的线程下面放空对象，
+// 因为线程调用 ::exit() 永远不会过渡到稳定的状态. 
+// 这抑制了 GC，从而抑制异步的 GC （和不合时宜的）“this” 的开垦。
 //
 // We'd like to assert that: (THREAD->thread_state() != _thread_blocked) ;
 // There's one exception to the claim above, however.  EnterI() can call
@@ -878,12 +887,21 @@ void ObjectMonitor::UnlinkAfterAcquire(Thread *Self, ObjectWaiter *SelfNode) {
 // We use timers (timed park operations) & periodic polling to detect
 // and recover from stranding.  Potentially stranded threads periodically
 // wake up and poll the lock.  See the usage of the _Responsible variable.
+
+// ::exit() 使用一个典型的带有 MEMBAR (即常称的 Memory barrier, 内存屏障) 的 1-1 语句(idiom)，
+// 尽管一些快速路径运算符(fast-path operators)已被优化，因此常见的 ::exit() 操作为 1-0，
+// 例如，请参见 macroAssembler_x86.cpp:fast_unlock(). fast_unlock() 发出的代码消除了通常的 MEMBAR. 这大大提高了延迟--MEMBAR 和 CAS 在现代处理器上具有相当大的本地延迟--但代价是“搁浅(stranding)”。
+// 如果没有 MEMBAR，fast_unlock() 中的线程可以在 slow::enter() 路径中与线程竞争，导致进入线程被搁浅(stranding)，进程活跃度(progress-liveness)失败(failure).
+// 搁浅极为罕见, 我们使用计时器（timed park 操作）和定期轮询来检测和恢复搁浅.
+// 可能搁浅的线程会定期唤醒并轮询锁.请参见 _Reresponsible 变量的用法
 //
 // The CAS() in enter provides for safety and exclusion, while the CAS or
 // MEMBAR in exit provides for progress and avoids stranding.  1-0 locking
 // eliminates the CAS/MEMBAR from the exit path, but it admits stranding.
 // We detect and recover from stranding with timers.
-//
+// enter 中的 CAS() 提供了安全和互斥功能，而 exit 中的 CAS 或 MEMBAR(Memory barrier, 内存屏障) 提供改进(progress)并避免搁浅.
+// 1-0 锁定消除了出口路径上的 CAS/MEMBAR，但允许搁浅(stranding). 我们用计时器检测并从搁浅中恢复.
+// 
 // If a thread transiently strands it'll park until (a) another
 // thread acquires the lock and then drops the lock, at which time the
 // exiting thread will notice and unpark the stranded thread, or, (b)
@@ -897,12 +915,23 @@ void ObjectMonitor::UnlinkAfterAcquire(Thread *Self, ObjectWaiter *SelfNode) {
 // the integral of the # of active timers at any instant over time).
 // Both impinge on OS scalability.  Given that, at most one thread parked on
 // a monitor will use a timer.
+// 如果一个线程暂时搁浅，它将 park(即休眠) 直到
+// （a）另一个线程获得锁，然后释放锁，这时退出的线程会注意到并解除搁浅的线程.
+// （b）计时器到期. 
+// 如果锁是高流量的，那么由于 (a), 搁浅的延迟会很低. 
+// 如果锁的流量很低，那么搁浅的几率就比较低，尽管最坏的情况下，搁浅的延迟会更长.
+// 最关键的是，我们不希望给平台的定时器子系统带来过多的负荷. 
+// 我们希望将定时器的注入率（创建的定时器/秒）以及在任何时候都处于活动状态的定时器的数量降到最低.
+//  (更确切地说，我们希望最小化定时器秒数，也就是在任何时刻活跃的定时器数量在时间上的积分）.
+// 两者都会对操作系统的可扩展性造成影响. 考虑到这些，最多只有一个 park 在 monitor 上的线程会使用一个定时器.
 //
 // There is also the risk of a futile wake-up. If we drop the lock
 // another thread can reacquire the lock immediately, and we can
 // then wake a thread unnecessarily. This is benign, and we've
 // structured the code so the windows are short and the frequency
 // of such futile wakups is low.
+// 还有一个风险是徒劳的唤醒: 如果我们放弃了锁，另一个线程可以立即重新获得锁，那么我们就会不必要地唤醒一个线程.
+// 这是良性的，而且我们的代码结构使窗口很短，这种徒劳的唤醒的频率很低.
 // 退出 monitor(释放锁) 的方法.
 void ObjectMonitor::exit(bool not_suspended, TRAPS) {
   Thread * const Self = THREAD;
@@ -946,6 +975,7 @@ void ObjectMonitor::exit(bool not_suspended, TRAPS) {
 
   // Invariant: after setting Responsible=null an thread must execute
   // a MEMBAR or other serializing instruction before fetching EntryList|cxq.
+  // 不变量: 在设置 Responsible=null 后，线程必须在获取 EntryList | cxq 前执行 MEMBAR(Memory barrier, 内存屏障) 或其他序列化指令.
   _Responsible = NULL;
 
 #if INCLUDE_JFR
@@ -963,7 +993,7 @@ void ObjectMonitor::exit(bool not_suspended, TRAPS) {
     // must not float (reorder) past the following store that drops the lock.
     // 1.  将 _owner 置为 null.
     Atomic::release_store(&_owner, (void*)NULL);   // drop the lock
-    // 内存屏障, 防止指令重排序.
+    // 内存屏障(Memory barrier, 或称为 MEMBAR), 防止指令重排序.
     OrderAccess::storeload();                      // See if we need to wake a successor
     // 2. 如果 _cxq 和 _EntryList 为空或者 _succ(假定继承人) 不为 NULL 直接退出.
     if ((intptr_t(_EntryList)|intptr_t(_cxq)) == 0 || _succ != NULL) {
