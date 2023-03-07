@@ -1166,11 +1166,11 @@ bool ObjectMonitor::ExitSuspendEquivalent(JavaThread * jSelf) {
 void ObjectMonitor::ExitEpilog(Thread * Self, ObjectWaiter * Wakee) {
   assert(_owner == Self, "invariant");
 
-  // Exit protocol:
-  // 1. ST _succ = wakee
-  // 2. membar #loadstore|#storestore;
-  // 2. ST _owner = NULL
-  // 3. unpark(wakee)
+  // Exit protocol: Exit 协议
+  // 1. ST _succ = wakee               _succ(假定继承人) 设置为要唤醒的线程.
+  // 2. membar #loadstore|#storestore; 使用内存屏障, 防止指令重排序、CPU 缓存导致的并发错误.
+  // 2. ST _owner = NULL               _owner 设置为 NULL
+  // 3. unpark(wakee)                  唤醒要唤醒的线程.
 
   _succ = Wakee->_thread;
   ParkEvent * Trigger = Wakee->_event;
@@ -1448,7 +1448,7 @@ void ObjectMonitor::wait(jlong millis, bool interruptible, TRAPS) {
     // 没有其他线程会异步修改 TState.
     guarantee(node.TState != ObjectWaiter::TS_WAIT, "invariant");
     OrderAccess::loadload();
-    // 重置 _succ(假定继承人), 如果 _succ 为自身.
+    // 如果 _succ 为自身, 重置 _succ(假定继承人), .
     if (_succ == Self) _succ = NULL;
     WasNotified = node._notified;
 
