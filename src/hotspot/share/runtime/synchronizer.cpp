@@ -315,12 +315,23 @@ void ObjectSynchronizer::exit(oop object, BasicLock* lock, TRAPS) {
   // We cannot check for Biased Locking if we are racing an inflation.
   assert(mark == markWord::INFLATING() ||
          !mark.has_bias_pattern(), "should not see bias pattern here");
+ 
+  // 轻量级锁释放时, 会判断 Lock Record 记录的 mark word 值是否为 0（即 NULL） 
+  // * 如果是则表示是重入的释放，不做任何处理.
+  // * 如果不是进行真正的释放操作，通过 CAS 更新锁对象 mark word 为 Lock Record 中记录的值, 如果失败则表示期间锁发生了膨胀，此时会走锁膨胀，然后释放膨胀后的重量级锁(ObjectMonitor)的逻辑
 
+  // 轻量级锁在重入多次后，发生了锁膨胀，此时当轻量级锁释放时，和正常的轻量级锁释放时流程一样，只不过在 Lock Record 记录的 mark word 为 0 的情况下会增加的一个诊断
+  // * ObjectMonitor 关联的锁对象的 mark word 必须与 exit 对应的锁对象相等，不是抛出异常.
+  // * ObjectMonitor 是否当前线程获取，不是抛出异常.
+  // 由于轻量级锁膨胀后，之前的重入释放操作和之前一样，不会走 ObjectMonitor exit 操作，
+  // 因此在轻量级锁多次重入，然后被膨胀时，ObjectMonitor 的重入计数初始值没必要记录之前的重入次数，会使用初始值 0.
   markWord dhw = lock->displaced_header();
   if (dhw.value() == 0) {
     // If the displaced header is NULL, then this exit matches up with
     // a recursive enter. No real work to do here except for diagnostics.
+    // 如果 displaced header 为 NULL，则此出口与锁重入匹配. 除了诊断，这里没有真正的工作要做.
 #ifndef PRODUCT
+    // 不在膨胀中.
     if (mark != markWord::INFLATING()) {
       // Only do diagnostics if we are not racing an inflation. Simply
       // exiting a recursive enter of a Java Monitor that is being
@@ -328,6 +339,7 @@ void ObjectSynchronizer::exit(oop object, BasicLock* lock, TRAPS) {
       assert(!mark.is_neutral(), "invariant");
       assert(!mark.has_locker() ||
              THREAD->is_lock_owned((address)mark.locker()), "invariant");
+      // 轻量级锁重入后, 发生了锁膨胀, 轻量级锁变为重量级锁.
       if (mark.has_monitor()) {
         // The BasicLock's displaced_header is marked as a recursive
         // enter and we have an inflated Java Monitor (ObjectMonitor).
@@ -337,6 +349,11 @@ void ObjectSynchronizer::exit(oop object, BasicLock* lock, TRAPS) {
         // Monitor owner's stack and update the BasicLocks because a
         // Java Monitor can be asynchronously inflated by a thread that
         // does not own the Java Monitor.
+
+        // BasicLock 的 displaced_header 被标记为重入，并且我们有一个膨胀的 Java Monitor（ObjectMonitor）。
+        // 这是一个特殊的情况，在这个线程重入地进入堆栈锁(stack-lock)之后，Java Monitor 膨胀了
+        // 当 Java Monitor 膨胀时，我们无法安全地遍历 Java Monitor 所有者的堆栈并更新 BasicLocks，
+        // 因为 Java Monitor 可以由不拥有 Java Monitor 的线程异步膨胀.
         ObjectMonitor* m = mark.monitor();
         assert(((oop)(m->object()))->mark() == mark, "invariant");
         assert(m->is_entered(THREAD), "invariant");
@@ -350,6 +367,8 @@ void ObjectSynchronizer::exit(oop object, BasicLock* lock, TRAPS) {
     // If the object is stack-locked by the current thread, try to
     // swing the displaced header from the BasicLock back to the mark.
     assert(dhw.is_neutral(), "invariant");
+    // 轻量级锁释放流程：如果对象被当前线程堆栈锁定，
+    // 尝试将 BasicLock 中记录的 markWord 通过 CAS 更新回原对象.
     if (object->cas_set_mark(dhw, mark) == mark) {
       return;
     }
